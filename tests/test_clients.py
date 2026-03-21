@@ -189,6 +189,28 @@ def test_identify_title_uses_ocr_for_visible_title_without_year() -> None:
 
 
 @pytest.mark.asyncio
+async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+    client._ocr_engine = object()
+    client._ocr_backend = "rapidocr"
+
+    def boom(path: str):
+        raise RuntimeError("ocr failed")
+
+    client._ocr_engine = boom
+
+    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool) -> VisionCandidate:
+        return VisionCandidate(detected_title="Inland Empire", media_type="movie", year=2006, confidence=0.95)
+
+    monkeypatch.setattr(client, "_query_candidate", fake_query_candidate)
+
+    candidate = await client.identify_title(b"fake-image-bytes")
+
+    assert candidate.detected_title == "Inland Empire"
+    assert candidate.year == 2006
+
+
+@pytest.mark.asyncio
 async def test_tmdb_prefers_unique_exact_title_and_year_match(monkeypatch) -> None:
     class FakeResponse:
         def __init__(self, payload: dict) -> None:

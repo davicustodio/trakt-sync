@@ -77,40 +77,28 @@ def test_is_authorized_self_chat_accepts_owner_lid_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_command_schedules_local_task_for_x_info(monkeypatch) -> None:
-    scheduled: list[tuple[str, tuple[object, ...]]] = []
+async def test_dispatch_command_runs_x_info_inline(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
 
     async def fake_process_x_info(ctx: dict, chat_jid: str, requester_phone: str) -> None:
-        return None
-
-    def fake_create_task(coro) -> str:
-        scheduled.append((coro.cr_code.co_name, coro.cr_frame.f_locals["chat_jid"], coro.cr_frame.f_locals["requester_phone"]))
-        coro.close()
-        return "task"
+        calls.append((chat_jid, requester_phone))
 
     monkeypatch.setattr("app.main.process_x_info", fake_process_x_info)
-    monkeypatch.setattr("app.main.asyncio.create_task", fake_create_task)
 
     await dispatch_command("x-info", "5511999999999@s.whatsapp.net", "5511999999999")
 
-    assert scheduled == [("fake_process_x_info", "5511999999999@s.whatsapp.net", "5511999999999")]
+    assert calls == [("5511999999999@s.whatsapp.net", "5511999999999")]
 
 
 @pytest.mark.asyncio
-async def test_dispatch_command_schedules_local_task_for_x_save(monkeypatch) -> None:
-    scheduled: list[str] = []
+async def test_dispatch_command_runs_x_save_inline(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
 
     async def fake_process_x_save(ctx: dict, chat_jid: str, requester_phone: str) -> None:
-        return None
-
-    def fake_create_task(coro) -> str:
-        scheduled.append(coro.cr_code.co_name)
-        coro.close()
-        return "task"
+        calls.append((chat_jid, requester_phone))
 
     monkeypatch.setattr("app.main.process_x_save", fake_process_x_save)
-    monkeypatch.setattr("app.main.asyncio.create_task", fake_create_task)
 
     await dispatch_command("x-save", "5511999999999@s.whatsapp.net", "5511999999999")
 
-    assert scheduled == ["fake_process_x_save"]
+    assert calls == [("5511999999999@s.whatsapp.net", "5511999999999")]

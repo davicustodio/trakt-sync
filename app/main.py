@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import asyncio
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
@@ -70,9 +69,9 @@ async def dispatch_command(
     requester_phone: str,
 ) -> None:
     if command == "x-info":
-        asyncio.create_task(process_x_info({}, chat_jid, requester_phone))
+        await process_x_info({}, chat_jid, requester_phone)
     elif command == "x-save":
-        asyncio.create_task(process_x_save({}, chat_jid, requester_phone))
+        await process_x_save({}, chat_jid, requester_phone)
 
 
 @app.post("/webhooks/evolution/messages")

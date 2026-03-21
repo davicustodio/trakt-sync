@@ -146,3 +146,7 @@
   - Confirmed the current uncommitted fix changes OCR initialization from eager import to lazy-load on first use.
   - Re-ran the high-value test suite against the lazy-load patch and confirmed all targeted tests passed.
   - Recorded that Dokploy currently exposes a stale `EVOLUTION_OWNER_LID` value and that the last OCR deploy likely caused the `502` production route failure.
+  - Restored the production route and confirmed `/health` and `/ready` respond again after the lazy-load OCR deploy.
+  - Reproduced the remaining failure in production and isolated it to media retrieval: the WhatsApp CDN URL was returning encrypted bytes instead of a decodable image.
+  - Validated Evolution's `getBase64FromMediaMessage` endpoint against the live instance and patched the app to fetch decrypted media by `provider_message_id` before falling back to the raw URL.
+  - Re-ran the targeted suite after the media retrieval fix and confirmed all tests passed.

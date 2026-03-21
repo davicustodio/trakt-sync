@@ -75,6 +75,7 @@ Phase 6
 | Dokploy MCP deploy endpoints returned malformed JSON or did not start a build | 1 | Switched to the GitHub push webhook flow using the application's deploy token |
 | Production startup initially failed behind Traefik | 2 | Added `asyncpg`, then switched deployed `DATABASE_URL` to SQLite fallback because the target environment did not expose a guaranteed Postgres host |
 | Production route returned `502 Bad Gateway` after the OCR rollout | 1 | Reworked OCR initialization to lazy-load the engine so startup is no longer coupled to `rapidocr_onnxruntime` import success |
+| Production `x-info` still failed after the SSL fix | 1 | Verified the WhatsApp CDN URL returned encrypted media bytes and switched media retrieval to Evolution's `getBase64FromMediaMessage` endpoint keyed by the provider message ID |
 
 ## Notes
 - Keep web research findings out of this file and store them in findings.md.

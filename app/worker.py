@@ -22,13 +22,7 @@ async def process_x_info(_: dict, chat_jid: str, requester_phone: str) -> None:
         service = MessageService(settings, db)
         try:
             message = await service.find_latest_image(chat_jid, requester_phone)
-            if not message.media_url:
-                await pipeline.evolution.send_text(
-                    chat_jid,
-                    "Nao encontrei uma URL de midia reutilizavel nessa imagem. Ajuste o Evolution para enviar mediaUrl ou webhook_base64.",
-                )
-                return
-            enriched = await pipeline.enrich_from_image(message.media_url)
+            enriched = await pipeline.enrich_from_image(message.provider_message_id, message.media_url)
             await service.save_identified_media(message, enriched)
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_whatsapp_reply(enriched))
         except AmbiguousTitleError as exc:

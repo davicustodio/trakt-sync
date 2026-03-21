@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import binascii
 import contextlib
 import os
 import re
@@ -40,7 +41,27 @@ class EvolutionClient:
             )
             response.raise_for_status()
 
-    async def fetch_media_bytes(self, media_url: str) -> bytes:
+    async def fetch_media_bytes(self, provider_message_id: str, media_url: str | None = None) -> bytes:
+        async with httpx.AsyncClient(base_url=self.settings.evolution_base_url, timeout=60.0) as client:
+            response = await client.post(
+                f"/chat/getBase64FromMediaMessage/{self.settings.evolution_instance}",
+                headers=self._headers(),
+                json={"message": {"key": {"id": provider_message_id}}, "convertToMp4": False},
+            )
+            if response.status_code < 400:
+                payload = response.json()
+                media_b64 = payload.get("base64")
+                if media_b64:
+                    if "," in media_b64 and media_b64.split(",", 1)[0].startswith("data:"):
+                        media_b64 = media_b64.split(",", 1)[1]
+                    try:
+                        return base64.b64decode(media_b64)
+                    except (binascii.Error, ValueError):
+                        pass
+
+        if not media_url:
+            raise HTTPException(status_code=404, detail="No reusable media payload found for this message.")
+
         # WhatsApp CDN URLs occasionally fail certificate validation inside minimal containers.
         async with httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=False) as client:
             response = await client.get(media_url)

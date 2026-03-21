@@ -28,7 +28,12 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
             pass
 
         async def find_latest_image(self, chat_jid: str, requester_phone: str | None = None):
-            return SimpleNamespace(media_url="https://example.com/poster.jpg", chat_jid=chat_jid, requester_phone="5511")
+            return SimpleNamespace(
+                provider_message_id="abc123",
+                media_url="https://example.com/poster.jpg",
+                chat_jid=chat_jid,
+                requester_phone="5511",
+            )
 
         async def save_identified_media(self, message, enriched) -> None:
             raise AssertionError("ambiguous result must not be persisted")
@@ -41,7 +46,9 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
         def __init__(self, settings) -> None:
             self.evolution = FakeEvolution()
 
-        async def enrich_from_image(self, media_url: str):
+        async def enrich_from_image(self, provider_message_id: str, media_url: str | None = None):
+            assert provider_message_id == "abc123"
+            assert media_url == "https://example.com/poster.jpg"
             raise AmbiguousTitleError(["Dark (2017) - Serie", "1899 (2022) - Serie"])
 
         async def format_ambiguous_reply(self, options: list[str]) -> str:

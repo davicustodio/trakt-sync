@@ -34,6 +34,8 @@
 - After introducing OCR support with an eager `RapidOCR()` import, the Dokploy route started returning `502 Bad Gateway`, which strongly suggests container startup/runtime failure inside the slim image.
 - Lazy-loading the OCR engine at first use keeps the OCR fallback available without making service startup depend on the OCR runtime loading cleanly.
 - Evolution accepts self-chat test payloads through `/message/sendMedia/{instance}` and `/message/sendText/{instance}`, and conversation history can be inspected through `/chat/findMessages/{instance}`.
+- The `imageMessage.url` coming from WhatsApp is not reliably a directly readable image for OCR; downloading that URL can return the encrypted media blob as `application/octet-stream`.
+- Evolution's official `POST /chat/getBase64FromMediaMessage/{instance}` endpoint returns the decrypted media bytes keyed by the message ID and is the correct source for image analysis.
 
 ## Technical Decisions
 | Decision | Rationale |

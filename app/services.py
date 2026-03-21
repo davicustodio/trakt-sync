@@ -142,8 +142,8 @@ class PipelineService:
         self.omdb = OMDbClient(settings)
         self.trakt = TraktClient(settings)
 
-    async def enrich_from_image(self, media_url: str) -> EnrichedMedia:
-        image = await self.evolution.fetch_media_bytes(media_url)
+    async def enrich_from_image(self, provider_message_id: str, media_url: str | None = None) -> EnrichedMedia:
+        image = await self.evolution.fetch_media_bytes(provider_message_id, media_url)
         candidate = await self.openrouter.identify_title(image)
         enriched = await self.tmdb.search_and_enrich(candidate)
         return await self.omdb.attach_ratings(enriched)

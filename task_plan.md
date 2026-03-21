@@ -42,8 +42,8 @@ Phase 6
 - [x] Prevent duplicate webhook retries from enqueueing commands again
 - [x] Handle ambiguous identification responses without false positives
 - [x] Expand automated tests for webhook and worker flows
-- [ ] Publish the hardened build and validate production behavior again
-- **Status:** in_progress
+- [x] Publish the hardened build and validate production behavior again
+- **Status:** complete
 
 ## Key Questions
 1. Which webhook/event shapes are available from the Evolution API instance managed inside Dokploy2?

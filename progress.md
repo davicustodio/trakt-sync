@@ -99,13 +99,14 @@
 ## Session: 2026-03-21
 
 ### Phase 6: Hardening & Acceptance
-- **Status:** in_progress
+- **Status:** complete
 - Actions taken:
   - Enforced strict owner self-chat authorization ahead of persistence and dispatch.
   - Added duplicate-event suppression based on `provider_message_id`.
   - Added ambiguity handling so close TMDb matches return a shortlist instead of a forced answer.
   - Simplified `x-save` to reuse the already confirmed TMDb/IMDb IDs instead of re-searching the title.
   - Installed the local project dependencies and expanded the test suite for webhook, pipeline, and worker flows.
+  - Published commit `9d7821c` and validated the Dokploy deployment plus remote webhook behavior.
 - Files created/modified:
   - `app/exceptions.py` (created)
   - `app/clients.py` (updated)
@@ -124,3 +125,6 @@
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
 | Full unit suite | `pytest -q` | Webhook, worker, utils, and pipeline pass | 13 passed | pass |
+| Production health | `GET /trakt-sync/health` | 200 with `{\"status\":\"ok\"}` | Confirmed after hardening deploy | pass |
+| Production duplicate retry | Two identical webhook posts | First accepted, second ignored as duplicate | Confirmed | pass |
+| Production external block | Foreign-number webhook post | Ignore with `self-chat-only` reason | Confirmed | pass |

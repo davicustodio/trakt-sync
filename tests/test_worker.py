@@ -61,6 +61,9 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
         async def format_ambiguous_reply(self, options: list[str]) -> str:
             return "\n".join(options)
 
+        async def format_review_messages(self, enriched) -> list[str]:
+            return []
+
     monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
     monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
     monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
@@ -187,6 +190,9 @@ async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypat
                 ["ocr: no confident local text match", "google/gemini-2.5-flash: RuntimeError"],
             )
 
+        async def format_review_messages(self, enriched) -> list[str]:
+            return []
+
     monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
     monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
     monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
@@ -202,4 +208,61 @@ async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypat
         "- google/gemini-2.5-flash: RuntimeError\n"
         "\n"
         "Se esta imagem for um print do Instagram/WhatsApp, envie uma captura mais fechada no poster ou frame."
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_x_save_reports_connect_link_when_trakt_missing(monkeypatch) -> None:
+    sent_messages: list[str] = []
+
+    class FakeResult:
+        def __init__(self, value):
+            self.value = value
+
+        def scalar_one_or_none(self):
+            return self.value
+
+    class FakeDB:
+        async def execute(self, query):
+            return FakeResult(None)
+
+    class FakeMessageService:
+        def __init__(self, settings, db) -> None:
+            pass
+
+        async def get_latest_identified_media(self, requester_phone: str):
+            return SimpleNamespace(
+                title="Pulp Fiction",
+                media_type="movie",
+                year=1994,
+                confidence=0.99,
+                imdb_id="tt0110912",
+                tmdb_id=680,
+                overview="Crime entrelacado.",
+                payload={"source": "tmdb"},
+            )
+
+    class FakeEvolution:
+        async def send_text(self, chat_jid: str, text: str) -> None:
+            sent_messages.append(text)
+
+    class FakePipelineService:
+        def __init__(self, settings) -> None:
+            self.evolution = FakeEvolution()
+            self.trakt = SimpleNamespace()
+
+    monkeypatch.setattr(
+        "app.worker.get_settings",
+        lambda: SimpleNamespace(app_base_url="https://trakt-sync.example.com", admin_shared_secret="secret"),
+    )
+    monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(FakeDB()))
+    monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
+    monkeypatch.setattr("app.worker.PipelineService", FakePipelineService)
+
+    await process_x_save({}, "5519988343888@s.whatsapp.net", "5519988343888")
+
+    assert sent_messages == [
+        "Falha ao salvar no Trakt: Telefone sem perfil cadastrado para Trakt. "
+        "Abra https://trakt-sync.example.com/admin/trakt/connect/5519988343888?token=secret "
+        "para conectar sua conta Trakt e depois envie x-save novamente."
     ]

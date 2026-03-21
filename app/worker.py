@@ -30,6 +30,8 @@ async def process_x_info(_: dict, chat_jid: str, requester_phone: str, trigger_m
             enriched = await pipeline.enrich_from_image(message.provider_message_id, message.media_url)
             await service.save_identified_media(message, enriched)
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_whatsapp_reply(enriched))
+            for review_message in await pipeline.format_review_messages(enriched):
+                await pipeline.evolution.send_text(chat_jid, review_message)
         except AmbiguousTitleError as exc:
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_ambiguous_reply(exc.options))
         except VisionIdentificationError as exc:
@@ -48,13 +50,15 @@ async def process_x_save(_: dict, chat_jid: str, requester_phone: str) -> None:
             profile_result = await db.execute(select(PhoneProfile).where(PhoneProfile.phone_number == requester_phone))
             profile = profile_result.scalar_one_or_none()
             if not profile:
-                raise ValueError("Telefone sem perfil cadastrado para Trakt.")
+                raise ValueError(_build_trakt_connect_message(settings, requester_phone, "Telefone sem perfil cadastrado para Trakt."))
             connection_result = await db.execute(
                 select(TraktConnection).where(TraktConnection.phone_profile_id == profile.id)
             )
             connection = connection_result.scalar_one_or_none()
             if not connection:
-                raise ValueError("Telefone sem conta Trakt vinculada. Use /admin/trakt para conectar.")
+                raise ValueError(
+                    _build_trakt_connect_message(settings, requester_phone, "Telefone sem conta Trakt vinculada.")
+                )
             access_token, refresh_token, expires_at = await pipeline.trakt.ensure_fresh_tokens(connection)
             connection.access_token = access_token
             connection.refresh_token = refresh_token
@@ -88,6 +92,16 @@ def _format_x_info_failure(exc: Exception) -> str:
     if isinstance(exc, HTTPException):
         return f"Falha ao analisar a imagem para o x-info. Motivo: {exc.detail}"
     return f"Falha ao analisar a imagem para o x-info. Motivo: {exc}"
+
+
+def _build_trakt_connect_message(settings, requester_phone: str, reason: str) -> str:
+    base = settings.app_base_url.rstrip("/")
+    if settings.admin_shared_secret:
+        return (
+            f"{reason} Abra {base}/admin/trakt/connect/{requester_phone}?token={settings.admin_shared_secret} "
+            "para conectar sua conta Trakt e depois envie x-save novamente."
+        )
+    return f"{reason} Abra {base}/admin/trakt para conectar sua conta Trakt e depois envie x-save novamente."
 
 
 class WorkerSettings:

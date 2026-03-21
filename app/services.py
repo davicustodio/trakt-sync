@@ -170,7 +170,6 @@ class PipelineService:
         providers_lines = [f"- {provider}" for provider in enriched.providers[:6]] or [
             "- Nenhuma disponibilidade confirmada no Brasil no momento."
         ]
-        review_lines = [f"{index + 1}. {review}" for index, review in enumerate(enriched.reviews[:3])]
         genres = ", ".join(enriched.genres[:4]) if enriched.genres else "Nao informado"
         release_date = self._format_date(enriched.release_date)
         return "\n".join(
@@ -189,13 +188,16 @@ class PipelineService:
                 "Resumo",
                 enriched.overview or "Sem resumo disponivel.",
                 "",
-                "Reviews",
-                *(review_lines or ["1. Nenhuma review disponivel."]),
-                "",
                 "Comando",
                 "- x-save",
             ]
         )
+
+    async def format_review_messages(self, enriched: EnrichedMedia) -> list[str]:
+        messages: list[str] = []
+        for index, review in enumerate(enriched.reviews[:3]):
+            messages.append(f"Review {index + 1}\n{review}")
+        return messages
 
     async def format_ambiguous_reply(self, options: list[str]) -> str:
         lines = [f"{index + 1}. {option}" for index, option in enumerate(options[:3])]

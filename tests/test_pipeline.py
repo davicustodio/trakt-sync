@@ -45,6 +45,21 @@ async def test_format_whatsapp_reply_formats_release_date() -> None:
     assert "Lancamento: 10/11/2016" in text
     assert "IMDb: 7.9/10" in text
     assert "Netflix (assinatura)" in text
+    assert "Reviews" not in text
+
+
+@pytest.mark.asyncio
+async def test_format_review_messages_returns_three_separate_messages() -> None:
+    pipeline = PipelineService(build_settings())
+    enriched = types.SimpleNamespace(reviews=["Review completa 1", "Review completa 2", "Review completa 3"])
+
+    messages = await pipeline.format_review_messages(enriched)
+
+    assert messages == [
+        "Review 1\nReview completa 1",
+        "Review 2\nReview completa 2",
+        "Review 3\nReview completa 3",
+    ]
 
 
 def test_tmdb_client_detects_ambiguity() -> None:

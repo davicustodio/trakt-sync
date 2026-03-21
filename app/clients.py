@@ -118,17 +118,27 @@ class OpenRouterClient:
 
     async def identify_title(self, image_bytes: bytes) -> VisionCandidate:
         ocr_candidate = self._identify_title_from_ocr(image_bytes)
-        if ocr_candidate is not None:
+        ocr_hint: VisionCandidate | None = None
+        if ocr_candidate is not None and self._should_return_ocr_candidate(ocr_candidate):
             return ocr_candidate
+        if ocr_candidate is not None:
+            ocr_hint = ocr_candidate
 
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
         attempts = ["ocr: no confident local text match"]
+        ocr_hint_text = ""
+        if ocr_hint and ocr_hint.detected_title:
+            ocr_hint_text = (
+                f" Visible text may read as '{ocr_hint.detected_title}'. "
+                "If spacing is collapsed, restore the natural title spacing before answering."
+            )
         prompt = (
             "Identify the movie or TV series shown in the image. "
             "Return JSON only with keys: detected_title, media_type, year, confidence, alt_titles, "
             "visible_text, need_clarification. "
             "media_type must be one of movie, series, unknown. "
             "confidence must be between 0 and 1."
+            + ocr_hint_text
         )
         parsed, query_attempts = await self._query_candidate(image_b64, prompt, use_json_mode=True)
         attempts.extend(query_attempts)
@@ -192,6 +202,21 @@ class OpenRouterClient:
                     visible_text=[*lines, f"ocr_variant={variant_name}"],
                 )
         return None
+
+    def _should_return_ocr_candidate(self, candidate: VisionCandidate) -> bool:
+        title = (candidate.detected_title or "").strip()
+        if not title:
+            return False
+        if candidate.year:
+            return True
+        if candidate.media_type != "unknown":
+            return True
+        words = title.split()
+        if len(words) >= 2:
+            return True
+        if not title.isalpha():
+            return True
+        return False
 
     def _build_ocr_variants(self, image_bytes: bytes) -> list[tuple[str, bytes]]:
         variants = [("original", image_bytes)]
@@ -456,7 +481,7 @@ class TMDbClient:
                     provider_lines.append(f"{entry['provider_name']} ({label})")
             reviews = []
             for review in (payload.get("reviews") or {}).get("results", [])[:3]:
-                content = compact_text(review.get("content"), 220)
+                content = " ".join(str(review.get("content") or "").split())
                 if content:
                     reviews.append(content)
             return EnrichedMedia(

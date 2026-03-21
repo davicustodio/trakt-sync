@@ -42,7 +42,7 @@ class EvolutionClient:
             "number": self._destination_number(chat_jid),
             "text": text,
             "textMessage": {"text": text},
-            "options": {"delay": 0, "presence": "composing"},
+            "options": {"delay": 0},
         }
         async with httpx.AsyncClient(base_url=self.settings.evolution_base_url, timeout=30.0) as client:
             response = await client.post(

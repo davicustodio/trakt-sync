@@ -91,7 +91,7 @@ async def test_send_text_maps_owner_lid_to_owner_phone(monkeypatch) -> None:
                 "number": "5519988343888",
                 "text": "teste",
                 "textMessage": {"text": "teste"},
-                "options": {"delay": 0, "presence": "composing"},
+                "options": {"delay": 0},
             },
         }
     ]

@@ -29,6 +29,11 @@
 - The user prefers ambiguity to be surfaced as 2-3 likely options rather than forcing a weak title match.
 - WhatsApp screenshots pasted from mobile clients can arrive wrapped in `viewOnceMessage*` or `ephemeralMessage`; the webhook parser must unwrap those envelopes before looking for `imageMessage`.
 - Redis availability alone is not enough to guarantee command execution; when the ARQ health key is absent, the API should execute `x-info`/`x-save` inline instead of queueing work that no worker will consume.
+- The production Evolution instance `meu-whatsapp` reports `ownerJid` as `5519988343888@s.whatsapp.net`, while the Dokploy application environment still carries an older `EVOLUTION_OWNER_LID` value.
+- Real end-to-end tests through Evolution proved the webhook path is live because the bot replied with a media-analysis SSL error before the SSL bypass fix.
+- After introducing OCR support with an eager `RapidOCR()` import, the Dokploy route started returning `502 Bad Gateway`, which strongly suggests container startup/runtime failure inside the slim image.
+- Lazy-loading the OCR engine at first use keeps the OCR fallback available without making service startup depend on the OCR runtime loading cleanly.
+- Evolution accepts self-chat test payloads through `/message/sendMedia/{instance}` and `/message/sendText/{instance}`, and conversation history can be inspected through `/chat/findMessages/{instance}`.
 
 ## Technical Decisions
 | Decision | Rationale |

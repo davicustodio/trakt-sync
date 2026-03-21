@@ -138,3 +138,11 @@
 | Production external block | Foreign-number webhook post | Ignore with `self-chat-only` reason | Confirmed | pass |
 | Full unit suite after screenshot fix | `pytest -q` | All tests green | 18 passed | pass |
 | Full unit suite after stale-worker fix | `pytest -q` | All tests green | 21 passed | pass |
+| Targeted suite after OCR lazy-load patch | `pytest -q tests/test_clients.py tests/test_main.py tests/test_webhook.py tests/test_utils.py tests/test_worker.py tests/test_pipeline.py` | Startup-safe OCR fallback and command path remain green | 20 passed | pass |
+
+### Phase 6: Production Recovery
+- **Status:** in_progress
+- Actions taken:
+  - Confirmed the current uncommitted fix changes OCR initialization from eager import to lazy-load on first use.
+  - Re-ran the high-value test suite against the lazy-load patch and confirmed all targeted tests passed.
+  - Recorded that Dokploy currently exposes a stale `EVOLUTION_OWNER_LID` value and that the last OCR deploy likely caused the `502` production route failure.

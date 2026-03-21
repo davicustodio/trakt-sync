@@ -42,8 +42,10 @@ Phase 6
 - [x] Prevent duplicate webhook retries from enqueueing commands again
 - [x] Handle ambiguous identification responses without false positives
 - [x] Expand automated tests for webhook and worker flows
-- [x] Publish the hardened build and validate production behavior again
-- **Status:** complete
+- [ ] Restore production after the OCR rollout regression
+- [ ] Reconcile Dokploy/Evolution owner JID configuration
+- [ ] Validate a full real-message image + `x-info` reply loop in production
+- **Status:** in_progress
 
 ## Key Questions
 1. Which webhook/event shapes are available from the Evolution API instance managed inside Dokploy2?
@@ -72,6 +74,7 @@ Phase 6
 | `rg --files` returned exit code 1 because the repo is effectively empty | 1 | Switched to `ls`/direct inspection and continued |
 | Dokploy MCP deploy endpoints returned malformed JSON or did not start a build | 1 | Switched to the GitHub push webhook flow using the application's deploy token |
 | Production startup initially failed behind Traefik | 2 | Added `asyncpg`, then switched deployed `DATABASE_URL` to SQLite fallback because the target environment did not expose a guaranteed Postgres host |
+| Production route returned `502 Bad Gateway` after the OCR rollout | 1 | Reworked OCR initialization to lazy-load the engine so startup is no longer coupled to `rapidocr_onnxruntime` import success |
 
 ## Notes
 - Keep web research findings out of this file and store them in findings.md.

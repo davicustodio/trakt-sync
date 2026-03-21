@@ -11,7 +11,6 @@ from urllib.parse import urlencode
 
 import httpx
 from fastapi import HTTPException
-from rapidocr_onnxruntime import RapidOCR
 
 from app.config import Settings
 from app.exceptions import AmbiguousTitleError
@@ -52,7 +51,7 @@ class EvolutionClient:
 class OpenRouterClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self._ocr_engine = RapidOCR()
+        self._ocr_engine = None
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -94,6 +93,13 @@ class OpenRouterClient:
         raise HTTPException(status_code=422, detail="Could not identify a movie or series from the image.")
 
     def _identify_title_from_ocr(self, image_bytes: bytes) -> VisionCandidate | None:
+        if self._ocr_engine is None:
+            try:
+                from rapidocr_onnxruntime import RapidOCR
+            except Exception:
+                return None
+            self._ocr_engine = RapidOCR()
+
         suffix = ".jpg"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
             handle.write(image_bytes)

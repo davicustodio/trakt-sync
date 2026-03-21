@@ -72,26 +72,43 @@ class MessageService:
         await self.db.commit()
         return PersistMessageResult(message=message, created=True)
 
-    async def find_latest_image(self, chat_jid: str, requester_phone: str | None = None) -> IncomingMessage:
-        min_time = datetime.now(UTC) - timedelta(minutes=self.settings.image_command_ttl_minutes)
+    async def get_message_by_provider_id(self, provider_message_id: str) -> IncomingMessage:
         result = await self.db.execute(
+            select(IncomingMessage).where(IncomingMessage.provider_message_id == provider_message_id).limit(1)
+        )
+        message = result.scalar_one_or_none()
+        if not message:
+            raise HTTPException(status_code=404, detail="Command message not found.")
+        return message
+
+    async def find_latest_image(
+        self,
+        chat_jid: str,
+        requester_phone: str | None = None,
+        *,
+        before_received_at: datetime | None = None,
+    ) -> IncomingMessage:
+        min_time = datetime.now(UTC) - timedelta(minutes=self.settings.image_command_ttl_minutes)
+        query = (
             select(IncomingMessage)
             .where(IncomingMessage.chat_jid == chat_jid)
             .where(IncomingMessage.message_type == "image")
             .where(IncomingMessage.received_at >= min_time)
-            .order_by(IncomingMessage.id.desc())
-            .limit(1)
         )
+        if before_received_at is not None:
+            query = query.where(IncomingMessage.received_at <= before_received_at)
+        result = await self.db.execute(query.order_by(IncomingMessage.id.desc()).limit(1))
         message = result.scalar_one_or_none()
         if not message and requester_phone:
-            result = await self.db.execute(
+            query = (
                 select(IncomingMessage)
                 .where(IncomingMessage.requester_phone == requester_phone)
                 .where(IncomingMessage.message_type == "image")
                 .where(IncomingMessage.received_at >= min_time)
-                .order_by(IncomingMessage.id.desc())
-                .limit(1)
             )
+            if before_received_at is not None:
+                query = query.where(IncomingMessage.received_at <= before_received_at)
+            result = await self.db.execute(query.order_by(IncomingMessage.id.desc()).limit(1))
             message = result.scalar_one_or_none()
         if not message:
             raise HTTPException(status_code=404, detail="No recent image found in this chat.")

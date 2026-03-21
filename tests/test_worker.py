@@ -27,7 +27,14 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
         def __init__(self, settings, db) -> None:
             pass
 
-        async def find_latest_image(self, chat_jid: str, requester_phone: str | None = None):
+        async def get_message_by_provider_id(self, provider_message_id: str):
+            assert provider_message_id == "cmd-1"
+            return SimpleNamespace(received_at=123)
+
+        async def find_latest_image(
+            self, chat_jid: str, requester_phone: str | None = None, *, before_received_at=None
+        ):
+            assert before_received_at == 123
             return SimpleNamespace(
                 provider_message_id="abc123",
                 media_url="https://example.com/poster.jpg",
@@ -59,7 +66,7 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
     monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
     monkeypatch.setattr("app.worker.PipelineService", FakePipelineService)
 
-    await process_x_info({}, "5519988343888@s.whatsapp.net", "5519988343888")
+    await process_x_info({}, "5519988343888@s.whatsapp.net", "5519988343888", "cmd-1")
 
     assert sent_messages == ["Dark (2017) - Serie\n1899 (2022) - Serie"]
 
@@ -153,7 +160,12 @@ async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypat
         def __init__(self, settings, db) -> None:
             pass
 
-        async def find_latest_image(self, chat_jid: str, requester_phone: str | None = None):
+        async def get_message_by_provider_id(self, provider_message_id: str):
+            return SimpleNamespace(received_at=123)
+
+        async def find_latest_image(
+            self, chat_jid: str, requester_phone: str | None = None, *, before_received_at=None
+        ):
             return SimpleNamespace(
                 provider_message_id="abc123",
                 media_url="https://example.com/poster.jpg",
@@ -180,7 +192,7 @@ async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypat
     monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
     monkeypatch.setattr("app.worker.PipelineService", FakePipelineService)
 
-    await process_x_info({}, "5519988343888@s.whatsapp.net", "5519988343888")
+    await process_x_info({}, "5519988343888@s.whatsapp.net", "5519988343888", "cmd-1")
 
     assert sent_messages == [
         "Falha ao analisar a imagem para o x-info.\n"

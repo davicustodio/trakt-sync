@@ -81,16 +81,19 @@ async def dispatch_command(
     chat_jid: str,
     requester_phone: str,
     background_tasks: BackgroundTasks,
+    trigger_message_id: str | None = None,
 ) -> None:
     if command == "x-info":
-        background_tasks.add_task(process_x_info, {}, chat_jid, requester_phone)
+        background_tasks.add_task(process_x_info, {}, chat_jid, requester_phone, trigger_message_id)
     elif command == "x-save":
         background_tasks.add_task(process_x_save, {}, chat_jid, requester_phone)
 
 
-async def dispatch_command_inline(command: str, chat_jid: str, requester_phone: str) -> None:
+async def dispatch_command_inline(
+    command: str, chat_jid: str, requester_phone: str, trigger_message_id: str | None = None
+) -> None:
     if command == "x-info":
-        await process_x_info({}, chat_jid, requester_phone)
+        await process_x_info({}, chat_jid, requester_phone, trigger_message_id)
     elif command == "x-save":
         await process_x_save({}, chat_jid, requester_phone)
 
@@ -117,9 +120,20 @@ async def handle_normalized_message(
     command = (normalized.text_body or "").strip().lower()
     if command in {"x-info", "x-save"}:
         if force_inline_dispatch or background_tasks is None:
-            await dispatch_command_inline(command, normalized.chat_jid, normalized.requester_phone)
+            await dispatch_command_inline(
+                command,
+                normalized.chat_jid,
+                normalized.requester_phone,
+                normalized.provider_message_id,
+            )
         else:
-            await dispatch_command(command, normalized.chat_jid, normalized.requester_phone, background_tasks)
+            await dispatch_command(
+                command,
+                normalized.chat_jid,
+                normalized.requester_phone,
+                background_tasks,
+                normalized.provider_message_id,
+            )
     return {"status": "accepted", "command": command or None}
 
 

@@ -16,13 +16,17 @@ async def startup(_: dict) -> None:
     await init_db()
 
 
-async def process_x_info(_: dict, chat_jid: str, requester_phone: str) -> None:
+async def process_x_info(_: dict, chat_jid: str, requester_phone: str, trigger_message_id: str | None = None) -> None:
     settings = get_settings()
     pipeline = PipelineService(settings)
     async with SessionLocal() as db:
         service = MessageService(settings, db)
         try:
-            message = await service.find_latest_image(chat_jid, requester_phone)
+            before_received_at = None
+            if trigger_message_id:
+                command_message = await service.get_message_by_provider_id(trigger_message_id)
+                before_received_at = command_message.received_at
+            message = await service.find_latest_image(chat_jid, requester_phone, before_received_at=before_received_at)
             enriched = await pipeline.enrich_from_image(message.provider_message_id, message.media_url)
             await service.save_identified_media(message, enriched)
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_whatsapp_reply(enriched))

@@ -92,7 +92,7 @@ def test_is_authorized_self_chat_accepts_owner_lid_message() -> None:
 async def test_dispatch_command_schedules_x_info_background_task(monkeypatch) -> None:
     calls: list[tuple[str, tuple[object, ...]]] = []
 
-    async def fake_process_x_info(ctx: dict, chat_jid: str, requester_phone: str) -> None:
+    async def fake_process_x_info(ctx: dict, chat_jid: str, requester_phone: str, trigger_message_id: str | None) -> None:
         return None
 
     def fake_add_task(func, *args, **kwargs) -> None:
@@ -102,9 +102,9 @@ async def test_dispatch_command_schedules_x_info_background_task(monkeypatch) ->
     background_tasks = BackgroundTasks()
     monkeypatch.setattr(background_tasks, "add_task", fake_add_task)
 
-    await dispatch_command("x-info", "5511999999999@s.whatsapp.net", "5511999999999", background_tasks)
+    await dispatch_command("x-info", "5511999999999@s.whatsapp.net", "5511999999999", background_tasks, "msg-1")
 
-    assert calls == [("fake_process_x_info", ({}, "5511999999999@s.whatsapp.net", "5511999999999"))]
+    assert calls == [("fake_process_x_info", ({}, "5511999999999@s.whatsapp.net", "5511999999999", "msg-1"))]
 
 
 @pytest.mark.asyncio

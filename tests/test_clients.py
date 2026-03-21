@@ -165,6 +165,29 @@ def test_identify_title_uses_local_ocr_for_title_cards() -> None:
     assert candidate.media_type == "movie"
 
 
+def test_identify_title_uses_ocr_for_visible_title_without_year() -> None:
+    image = Image.new("RGB", (900, 1200), "white")
+    draw = ImageDraw.Draw(image)
+    try:
+        title_font = ImageFont.truetype("/System/Library/Fonts/Supplemental/Arial Bold.ttf", 72)
+    except OSError:
+        title_font = ImageFont.load_default()
+    draw.text((80, 700), "INLAND EMPIRE", fill="black", font=title_font)
+    draw.text((80, 120), "movifiedbollywood", fill="gray", font=title_font)
+
+    from io import BytesIO
+
+    buffer = BytesIO()
+    image.save(buffer, format="PNG")
+
+    client = OpenRouterClient(build_settings())
+    candidate = client._identify_title_from_ocr(buffer.getvalue())
+
+    assert candidate is not None
+    assert candidate.detected_title == "Inland Empire"
+    assert candidate.year is None
+
+
 @pytest.mark.asyncio
 async def test_tmdb_prefers_unique_exact_title_and_year_match(monkeypatch) -> None:
     class FakeResponse:

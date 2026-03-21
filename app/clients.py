@@ -141,7 +141,19 @@ class OpenRouterClient:
 
         if self._ocr_backend == "rapidocr":
             result = self._ocr_engine(image_bytes)
-            lines = [text.strip() for text in getattr(result, "txts", ()) if text and text.strip()]
+            entries = [
+                {
+                    "text": text.strip(),
+                    "bbox": box.tolist() if hasattr(box, "tolist") else box,
+                    "score": score,
+                }
+                for text, box, score in zip(
+                    getattr(result, "txts", ()),
+                    getattr(result, "boxes", ()),
+                    getattr(result, "scores", ()),
+                )
+                if text and text.strip()
+            ]
         else:
             suffix = ".jpg"
             with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
@@ -152,7 +164,12 @@ class OpenRouterClient:
             finally:
                 with contextlib.suppress(OSError):
                     os.unlink(temp_path)
-            lines = [entry[1].strip() for entry in (result or []) if len(entry) >= 2 and entry[1].strip()]
+            entries = [
+                {"text": entry[1].strip(), "bbox": entry[0], "score": entry[2] if len(entry) >= 3 else 0.0}
+                for entry in (result or [])
+                if len(entry) >= 2 and entry[1].strip()
+            ]
+        lines = [entry["text"] for entry in entries]
         if not lines:
             return None
 
@@ -170,7 +187,77 @@ class OpenRouterClient:
                     confidence=0.98,
                     visible_text=lines,
                 )
+        title = self._guess_title_line(entries)
+        if title:
+            return VisionCandidate(
+                detected_title=title,
+                media_type="unknown",
+                confidence=0.9,
+                visible_text=lines,
+            )
         return None
+
+    def _guess_title_line(self, entries: list[dict[str, Any]]) -> str | None:
+        stopwords = {
+            "SORTED CINEMA",
+            "STREAMING",
+            "APPLETV",
+            "DISNEY PLUS",
+            "VOTAR",
+            "RESPOSTAS",
+            "SEGUIR",
+            "MOVIFIED",
+            "MOVIFIEDBOLLYWOOD",
+            "COMMENT",
+            "COMENTARIO",
+            "COMENTÁRIO",
+        }
+        best_line: str | None = None
+        best_score = 0.0
+        for entry in entries:
+            raw_text = str(entry.get("text") or "").strip()
+            if not raw_text:
+                continue
+            if "www." in raw_text.lower() or "http" in raw_text.lower() or "@" in raw_text:
+                continue
+            cleaned = re.sub(r"[^A-Za-z0-9&' -]", " ", raw_text)
+            cleaned = " ".join(cleaned.split()).strip(" -")
+            if not cleaned:
+                continue
+            upper_cleaned = cleaned.upper()
+            if any(token in upper_cleaned for token in stopwords):
+                continue
+            words = [word for word in cleaned.split() if word]
+            if not 1 <= len(words) <= 4:
+                continue
+            if len(cleaned) < 4 or len(cleaned) > 32:
+                continue
+            letters = [char for char in cleaned if char.isalpha()]
+            if not letters:
+                continue
+            non_space = cleaned.replace(" ", "")
+            alpha_ratio = len(letters) / max(len(non_space), 1)
+            uppercase_ratio = sum(char.isupper() for char in letters) / len(letters)
+            if alpha_ratio < 0.65:
+                continue
+            if uppercase_ratio < 0.7 and not cleaned.istitle():
+                continue
+            bbox = entry.get("bbox") or []
+            y_center = 0.0
+            if bbox:
+                ys = [float(point[1]) for point in bbox if isinstance(point, (list, tuple)) and len(point) >= 2]
+                if ys:
+                    y_center = sum(ys) / len(ys)
+            score = float(entry.get("score") or 0.0)
+            score += uppercase_ratio
+            score += 0.2 if len(words) in {2, 3} else 0.0
+            score += 0.2 if y_center >= 350 else 0.0
+            score += min(len(cleaned) / 20, 0.4)
+            if score <= best_score:
+                continue
+            best_score = score
+            best_line = cleaned.title() if cleaned.isupper() else cleaned
+        return best_line
 
     async def _query_candidate(self, image_b64: str, prompt: str, *, use_json_mode: bool) -> VisionCandidate:
         async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=90.0) as client:

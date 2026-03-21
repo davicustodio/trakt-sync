@@ -33,10 +33,44 @@ Criar um servico no Dokploy2 que use a instancia ja existente do Evolution API p
 
 ## 3. Stack recomendada
 
-- `webhook-api`: Node.js + TypeScript + Fastify
-- `worker`: Node.js + TypeScript
+- `webhook-api`: Python 3.12 + FastAPI
+- `worker`: Python 3.12 + ARQ ou Dramatiq
 - `postgres`: persistencia e idempotencia
 - `redis`: fila e locks curtos
+
+### Escolha recomendada
+
+Escolha **Python + FastAPI**.
+
+Motivos:
+
+- o problema e centrado em integracao com LLM, parsing de JSON, heuristicas de matching e IO externo
+- Python oferece menos atrito para esse tipo de fluxo do que Node neste projeto
+- FastAPI entrega tipagem forte com Pydantic, boa ergonomia para webhooks e callback OAuth
+- a mesma base em Python pode servir tanto para a API quanto para o worker
+- como o uso inicial parece pessoal ou de baixo volume, a performance de Python e mais do que suficiente
+
+### O que eu usaria na pratica
+
+- `fastapi` para a API
+- `uvicorn` para servir HTTP
+- `httpx` para OpenRouter, TMDb, OMDb, Trakt e Evolution
+- `pydantic-settings` para configuracao
+- `sqlalchemy` + `alembic` para banco
+- `redis` + `arq` para jobs assincronos
+- `structlog` ou logging JSON simples para observabilidade
+
+### O que eu nao recomendo
+
+- nao usar `FastAPI BackgroundTasks` para o fluxo pesado de `x-info`
+- nao fazer reconhecimento, TMDb, OMDb e Trakt dentro do request do webhook
+
+O webhook deve:
+
+1. validar o evento
+2. persistir o payload e o estado minimo
+3. publicar um job no Redis
+4. responder `200` rapidamente
 
 ## 4. Fontes de dados
 
@@ -248,6 +282,7 @@ Comando
 - manter `webhook-api`, `worker`, `postgres` e `redis` no mesmo projeto/ambiente do Evolution
 - preferir comunicacao privada pela rede interna
 - nao expor mais do que o necessario
+- rodar API e worker como processos separados, mesmo compartilhando a mesma base Python
 
 ### Eventos do Evolution
 
@@ -351,7 +386,7 @@ Recomendacao:
 
 ### Fase A
 
-- criar API e worker
+- criar API FastAPI e worker Python
 - provisionar Postgres e Redis
 - criar schema inicial
 - registrar webhook no Evolution

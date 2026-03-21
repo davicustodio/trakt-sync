@@ -257,8 +257,7 @@ class TMDbClient:
             if not scored:
                 raise HTTPException(status_code=404, detail="No TMDb match found.")
             scored.sort(key=lambda item: item[0], reverse=True)
-            self._raise_for_ambiguity(scored)
-            best = scored[0][1]
+            best = self._select_best_match(candidate, scored)
             media_type = "series" if best["media_type"] == "tv" else "movie"
             item_id = best["id"]
             detail_endpoint = f"/{'tv' if media_type == 'series' else 'movie'}/{item_id}"
@@ -298,6 +297,35 @@ class TMDbClient:
                 confidence=candidate.confidence,
                 payload=payload,
             )
+
+    def _select_best_match(self, candidate: VisionCandidate, scored: list[tuple[float, dict[str, Any]]]) -> dict[str, Any]:
+        exact_matches = [
+            result
+            for _, result in scored
+            if self._is_exact_title_match(candidate.detected_title, result) and self._is_exact_year_match(candidate.year, result)
+        ]
+        if len(exact_matches) == 1:
+            return exact_matches[0]
+        self._raise_for_ambiguity(scored)
+        return scored[0][1]
+
+    def _is_exact_title_match(self, detected_title: str | None, result: dict[str, Any]) -> bool:
+        if not detected_title:
+            return False
+        detected_title = detected_title.strip().lower()
+        titles = {
+            (result.get("title") or "").strip().lower(),
+            (result.get("name") or "").strip().lower(),
+            (result.get("original_title") or "").strip().lower(),
+            (result.get("original_name") or "").strip().lower(),
+        }
+        return detected_title in titles
+
+    def _is_exact_year_match(self, candidate_year: int | None, result: dict[str, Any]) -> bool:
+        if not candidate_year:
+            return False
+        result_year = (result.get("release_date") or result.get("first_air_date") or "")[:4]
+        return result_year == str(candidate_year)
 
     def _raise_for_ambiguity(self, scored: list[tuple[float, dict[str, Any]]]) -> None:
         if len(scored) < 2:

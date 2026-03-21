@@ -1,12 +1,17 @@
 from __future__ import annotations
 
 import base64
+import contextlib
+import os
+import re
+import tempfile
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
 
 import httpx
 from fastapi import HTTPException
+from rapidocr_onnxruntime import RapidOCR
 
 from app.config import Settings
 from app.exceptions import AmbiguousTitleError
@@ -47,6 +52,7 @@ class EvolutionClient:
 class OpenRouterClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+        self._ocr_engine = RapidOCR()
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -59,6 +65,10 @@ class OpenRouterClient:
         return headers
 
     async def identify_title(self, image_bytes: bytes) -> VisionCandidate:
+        ocr_candidate = self._identify_title_from_ocr(image_bytes)
+        if ocr_candidate is not None:
+            return ocr_candidate
+
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
         prompt = (
             "Identify the movie or TV series shown in the image. "
@@ -67,7 +77,54 @@ class OpenRouterClient:
             "media_type must be one of movie, series, unknown. "
             "confidence must be between 0 and 1."
         )
+        parsed = await self._query_candidate(image_b64, prompt, use_json_mode=True)
+        if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
+            return parsed
 
+        ocr_prompt = (
+            "Read the visible text in this image and use it to infer the movie or TV series title. "
+            "Return JSON only with keys: detected_title, media_type, year, confidence, alt_titles, "
+            "visible_text, need_clarification. "
+            "If the title is explicitly written in the image, copy it to detected_title and use confidence >= 0.9. "
+            "visible_text must contain the main readable text lines from the image."
+        )
+        parsed = await self._query_candidate(image_b64, ocr_prompt, use_json_mode=False)
+        if parsed.detected_title and parsed.confidence >= 0.75:
+            return parsed
+        raise HTTPException(status_code=422, detail="Could not identify a movie or series from the image.")
+
+    def _identify_title_from_ocr(self, image_bytes: bytes) -> VisionCandidate | None:
+        suffix = ".jpg"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(image_bytes)
+            temp_path = handle.name
+        try:
+            result, _ = self._ocr_engine(temp_path)
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_path)
+
+        lines = [entry[1].strip() for entry in (result or []) if len(entry) >= 2 and entry[1].strip()]
+        if not lines:
+            return None
+
+        for line in lines:
+            match = re.search(r"(?P<title>[A-Za-z0-9' .,:!?-]{2,})\((?P<year>\d{4})\)", line)
+            if not match:
+                continue
+            title = match.group("title").strip(" -")
+            year = int(match.group("year"))
+            if title:
+                return VisionCandidate(
+                    detected_title=title,
+                    media_type="movie",
+                    year=year,
+                    confidence=0.98,
+                    visible_text=lines,
+                )
+        return None
+
+    async def _query_candidate(self, image_b64: str, prompt: str, *, use_json_mode: bool) -> VisionCandidate:
         async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=90.0) as client:
             for model in [*self.settings.openrouter_vision_models, self.settings.openrouter_emergency_router]:
                 payload = {
@@ -86,19 +143,20 @@ class OpenRouterClient:
                             ],
                         }
                     ],
-                    "response_format": {"type": "json_object"},
                 }
+                if use_json_mode:
+                    payload["response_format"] = {"type": "json_object"}
                 try:
                     response = await client.post("/chat/completions", headers=self._headers(), json=payload)
                     response.raise_for_status()
                     data = response.json()
                     content = data["choices"][0]["message"]["content"]
                     parsed = VisionCandidate.model_validate(parse_json_response(content))
-                    if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
+                    if parsed.detected_title:
                         return parsed
                 except Exception:
                     continue
-        raise HTTPException(status_code=422, detail="Could not identify a movie or series from the image.")
+        return VisionCandidate()
 
 
 class TMDbClient:
@@ -114,24 +172,40 @@ class TMDbClient:
     async def search_and_enrich(self, candidate: VisionCandidate) -> EnrichedMedia:
         async with httpx.AsyncClient(base_url="https://api.themoviedb.org/3", timeout=60.0) as client:
             endpoint = "/search/multi"
-            params = {
-                "query": candidate.detected_title,
-                "language": self.settings.tmdb_language,
-                "include_adult": "false",
-            }
-            response = await client.get(endpoint, headers=self._headers(), params=params)
-            response.raise_for_status()
-            results = response.json().get("results", [])
+            seen: set[tuple[str, int]] = set()
+            results: list[dict[str, Any]] = []
+            for language in dict.fromkeys([self.settings.tmdb_language, "en-US"]):
+                params = {
+                    "query": candidate.detected_title,
+                    "language": language,
+                    "include_adult": "false",
+                }
+                response = await client.get(endpoint, headers=self._headers(), params=params)
+                response.raise_for_status()
+                for result in response.json().get("results", []):
+                    media_type = result.get("media_type")
+                    item_id = result.get("id")
+                    if media_type not in {"movie", "tv"} or not item_id:
+                        continue
+                    key = (media_type, int(item_id))
+                    if key in seen:
+                        continue
+                    seen.add(key)
+                    results.append(result)
             scored = []
             for result in results:
                 media_type = result.get("media_type")
-                if media_type not in {"movie", "tv"}:
-                    continue
                 score = 0.0
                 title = result.get("title") or result.get("name") or ""
-                if title.lower() == (candidate.detected_title or "").lower():
+                original_title = result.get("original_title") or result.get("original_name") or ""
+                detected_title = (candidate.detected_title or "").lower()
+                if title.lower() == detected_title:
                     score += 1.0
-                elif (candidate.detected_title or "").lower() in title.lower():
+                elif detected_title in title.lower():
+                    score += 0.5
+                if original_title.lower() == detected_title:
+                    score += 1.0
+                elif detected_title and detected_title in original_title.lower():
                     score += 0.5
                 if candidate.media_type == "series" and media_type == "tv":
                     score += 0.5
@@ -139,7 +213,7 @@ class TMDbClient:
                     score += 0.5
                 result_year = (result.get("release_date") or result.get("first_air_date") or "")[:4]
                 if candidate.year and result_year and str(candidate.year) == result_year:
-                    score += 0.5
+                    score += 1.0
                 score += min((result.get("popularity") or 0) / 100, 0.5)
                 scored.append((score, result))
             if not scored:

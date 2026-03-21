@@ -17,6 +17,7 @@ def build_settings() -> Settings:
         evolution_api_key="test",
         evolution_instance="meu-whatsapp",
         evolution_owner_phone="5519988343888",
+        evolution_owner_lid="121036657934449@lid",
         openrouter_api_key="test",
         tmdb_api_token="test",
         omdb_api_key="test",
@@ -54,6 +55,46 @@ async def test_fetch_media_bytes_prefers_evolution_base64_media(monkeypatch) -> 
     payload = await client.fetch_media_bytes("abc123", "https://example.com/poster.jpg")
 
     assert payload == b"decoded-bytes"
+
+
+@pytest.mark.asyncio
+async def test_send_text_maps_owner_lid_to_owner_phone(monkeypatch) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, path: str, headers: dict[str, str], json: dict[str, object]) -> FakeResponse:
+            calls.append({"path": path, "json": json})
+            return FakeResponse()
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    client = EvolutionClient(build_settings())
+    await client.send_text("121036657934449@lid", "teste")
+
+    assert calls == [
+        {
+            "path": "/message/sendText/meu-whatsapp",
+            "json": {
+                "number": "5519988343888",
+                "text": "teste",
+                "textMessage": {"text": "teste"},
+                "options": {"delay": 0, "presence": "composing"},
+            },
+        }
+    ]
 
 
 @pytest.mark.asyncio

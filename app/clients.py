@@ -16,7 +16,7 @@ from fastapi import HTTPException
 from app.config import Settings
 from app.exceptions import AmbiguousTitleError
 from app.schemas import EnrichedMedia, VisionCandidate
-from app.utils import compact_text, parse_json_response
+from app.utils import compact_text, normalize_phone, parse_json_response
 
 
 class EvolutionClient:
@@ -26,9 +26,19 @@ class EvolutionClient:
     def _headers(self) -> dict[str, str]:
         return {"apikey": self.settings.evolution_api_key, "Content-Type": "application/json"}
 
+    def _destination_number(self, chat_jid: str) -> str:
+        normalized_chat = normalize_phone(chat_jid)
+        owner_lid = normalize_phone(self.settings.evolution_owner_lid)
+        if owner_lid != "unknown" and normalized_chat == owner_lid:
+            return self.settings.evolution_owner_phone
+        owner_phone = normalize_phone(self.settings.evolution_owner_phone)
+        if normalized_chat == owner_phone:
+            return self.settings.evolution_owner_phone
+        return normalized_chat if normalized_chat != "unknown" else chat_jid
+
     async def send_text(self, chat_jid: str, text: str) -> None:
         payload = {
-            "number": chat_jid,
+            "number": self._destination_number(chat_jid),
             "text": text,
             "textMessage": {"text": text},
             "options": {"delay": 0, "presence": "composing"},

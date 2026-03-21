@@ -50,22 +50,6 @@ def build_payload(
     }
 
 
-class FakeRedis:
-    def __init__(self) -> None:
-        self.jobs: list[tuple[str, tuple[str, ...]]] = []
-        self.closed = False
-        self.worker_health: bytes | None = b"Mar-21 12:00:30 j_complete=1 j_failed=0 j_retried=0 j_ongoing=0 queued=0"
-
-    async def get(self, key: str) -> bytes | None:
-        return self.worker_health
-
-    async def enqueue_job(self, name: str, *args: str) -> None:
-        self.jobs.append((name, args))
-
-    async def close(self, close_connection_pool: bool = True) -> None:
-        self.closed = close_connection_pool
-
-
 async def fake_db_dep() -> AsyncIterator[object]:
     yield object()
 
@@ -94,15 +78,10 @@ def test_webhook_ignores_foreign_number(monkeypatch) -> None:
 def test_webhook_ignores_duplicate_event(monkeypatch) -> None:
     app.dependency_overrides[settings_dep] = lambda: build_settings()
     app.dependency_overrides[db_dep] = fake_db_dep
-    redis = FakeRedis()
-
-    async def fake_redis_pool() -> FakeRedis:
-        return redis
 
     async def fake_persist(self, normalized: NormalizedMessage) -> PersistMessageResult:
         return PersistMessageResult(message=SimpleNamespace(id=1), created=False)
 
-    monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
 
     with TestClient(app) as client:
@@ -111,23 +90,21 @@ def test_webhook_ignores_duplicate_event(monkeypatch) -> None:
     app.dependency_overrides.clear()
     assert response.status_code == 200
     assert response.json() == {"status": "ignored", "reason": "duplicate-event"}
-    assert redis.jobs == []
 
 
-def test_webhook_enqueues_x_info_for_owner_self_chat(monkeypatch) -> None:
+def test_webhook_schedules_x_info_for_owner_self_chat(monkeypatch) -> None:
     app.dependency_overrides[settings_dep] = lambda: build_settings()
     app.dependency_overrides[db_dep] = fake_db_dep
-    redis = FakeRedis()
-
-    async def fake_redis_pool() -> FakeRedis:
-        return redis
+    scheduled: list[tuple[str, str]] = []
 
     async def fake_persist(self, normalized: NormalizedMessage) -> PersistMessageResult:
         return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
 
-    monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
+    async def fake_dispatch(command: str, chat_jid: str, requester_phone: str) -> None:
+        scheduled.append((chat_jid, requester_phone))
+
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
-    monkeypatch.setattr("app.main.is_worker_health_fresh", lambda worker_health: True)
+    monkeypatch.setattr("app.main.dispatch_command", fake_dispatch)
 
     with TestClient(app) as client:
         response = client.post("/webhooks/evolution/messages", json=build_payload(provider_id="ok-1"))
@@ -135,25 +112,24 @@ def test_webhook_enqueues_x_info_for_owner_self_chat(monkeypatch) -> None:
     app.dependency_overrides.clear()
     assert response.status_code == 200
     assert response.json() == {"status": "accepted", "command": "x-info"}
-    assert redis.jobs == [("process_x_info", ("5519988343888@s.whatsapp.net", "5519988343888"))]
+    assert scheduled == [("5519988343888@s.whatsapp.net", "5519988343888")]
 
 
-def test_webhook_enqueues_x_info_for_owner_lid_chat(monkeypatch) -> None:
+def test_webhook_schedules_x_info_for_owner_lid_chat(monkeypatch) -> None:
     app.dependency_overrides[settings_dep] = lambda: build_settings()
     app.dependency_overrides[db_dep] = fake_db_dep
-    redis = FakeRedis()
-
-    async def fake_redis_pool() -> FakeRedis:
-        return redis
+    scheduled: list[tuple[str, str]] = []
 
     async def fake_persist(self, normalized: NormalizedMessage) -> PersistMessageResult:
         assert normalized.requester_phone == "5519988343888"
         assert normalized.sender_phone == "5519988343888"
         return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
 
-    monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
+    async def fake_dispatch(command: str, chat_jid: str, requester_phone: str) -> None:
+        scheduled.append((chat_jid, requester_phone))
+
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
-    monkeypatch.setattr("app.main.is_worker_health_fresh", lambda worker_health: True)
+    monkeypatch.setattr("app.main.dispatch_command", fake_dispatch)
 
     with TestClient(app) as client:
         response = client.post(
@@ -169,4 +145,4 @@ def test_webhook_enqueues_x_info_for_owner_lid_chat(monkeypatch) -> None:
     app.dependency_overrides.clear()
     assert response.status_code == 200
     assert response.json() == {"status": "accepted", "command": "x-info"}
-    assert redis.jobs == [("process_x_info", ("121036657934449@lid", "5519988343888"))]
+    assert scheduled == [("121036657934449@lid", "5519988343888")]

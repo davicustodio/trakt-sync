@@ -149,7 +149,7 @@ async def trakt_admin(
                 "display_name": profile.display_name,
                 "trakt_enabled": profile.trakt_enabled,
                 "has_token": bool(connection and connection.access_token),
-                "connect_url": f"/admin/trakt/connect/{profile.phone_number}",
+                "connect_url": str(request.url_for("connect_trakt", phone_number=profile.phone_number)),
             }
         )
     return templates.TemplateResponse(
@@ -159,12 +159,14 @@ async def trakt_admin(
             "profiles": profile_rows,
             "redirect_uri": settings.computed_trakt_redirect_uri,
             "admin_secret": settings.admin_shared_secret or "",
+            "register_url": str(request.url_for("register_phone")),
         },
     )
 
 
 @app.post("/admin/trakt/register")
 async def register_phone(
+    request: Request,
     _: Annotated[None, Depends(require_admin)],
     settings: Annotated[Settings, Depends(settings_dep)],
     db: Annotated[AsyncSession, Depends(db_dep)],
@@ -175,7 +177,7 @@ async def register_phone(
     profile = await service.upsert_phone_profile(normalize_phone(phone_number))
     profile.display_name = display_name
     await db.commit()
-    target = "/admin/trakt"
+    target = str(request.url_for("trakt_admin"))
     if settings.admin_shared_secret:
         target += f"?token={settings.admin_shared_secret}"
     return RedirectResponse(target, status_code=303)

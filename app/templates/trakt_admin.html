@@ -20,7 +20,7 @@
     <p>Redirect URI configurada: <code>{{ redirect_uri }}</code></p>
 
     <h2>Cadastrar telefone</h2>
-    <form method="post" action="/admin/trakt/register{% if admin_secret %}?token={{ admin_secret }}{% endif %}">
+    <form method="post" action="{{ register_url }}{% if admin_secret %}?token={{ admin_secret }}{% endif %}">
       <input name="phone_number" placeholder="5511999999999" required />
       <input name="display_name" placeholder="Nome opcional" />
       <button type="submit">Salvar</button>

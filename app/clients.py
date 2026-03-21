@@ -37,7 +37,8 @@ class EvolutionClient:
             response.raise_for_status()
 
     async def fetch_media_bytes(self, media_url: str) -> bytes:
-        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+        # WhatsApp CDN URLs occasionally fail certificate validation inside minimal containers.
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True, verify=False) as client:
             response = await client.get(media_url)
             response.raise_for_status()
             return response.content

@@ -49,6 +49,24 @@
   - `task_plan.md` (updated)
   - `progress.md` (updated)
 
+### Phase 5: Implementation & Deployment
+- **Status:** complete
+- Actions taken:
+  - Implemented the FastAPI application, async SQLAlchemy models, service layer, OpenRouter/TMDb/OMDb/Trakt clients, ARQ worker entrypoint, and a simple Trakt admin UI.
+  - Added Docker packaging, environment templates, and unit tests.
+  - Published the repository to GitHub and configured Dokploy to deploy from the repository.
+  - Created and validated a GitHub webhook targeting Dokploy's deploy token endpoint.
+  - Published the service behind `https://joaocat.duckdns.org/trakt-sync`.
+  - Configured the Evolution instance `meu-whatsapp` to send `MESSAGES_UPSERT` events to `https://joaocat.duckdns.org/trakt-sync/webhooks/evolution/messages`.
+- Files created/modified:
+  - `pyproject.toml` (created)
+  - `Dockerfile` (created)
+  - `.dockerignore` (created)
+  - `README.md` (created)
+  - `app/` (created)
+  - `tests/test_utils.py` (created)
+  - `.env.example` (updated)
+
 ## Test Results
 | Test | Input | Expected | Actual | Status |
 |------|-------|----------|--------|--------|
@@ -58,6 +76,11 @@
 | TMDb docs check | Official docs | Confirm search/details/watch-provider viability | Confirmed | pass |
 | Trakt contract check | Official repo schemas | Confirm watchlist and OAuth inputs | Confirmed | pass |
 | Env template check | `.env.example` | Expose only placeholder values | Confirmed | pass |
+| Unit tests | `pytest -q` | Service utilities pass | 3 passed | pass |
+| Deployed healthcheck | `GET /trakt-sync/health` | 200 with `{\"status\":\"ok\"}` | Confirmed | pass |
+| Deployed readiness | `GET /trakt-sync/ready` | 200 with `{\"status\":\"ready\"}` | Confirmed | pass |
+| Webhook acceptance | Synthetic image payload to deployed webhook | 200 accepted | Confirmed | pass |
+| Admin UI | `GET /trakt-sync/admin/trakt?token=...` | 200 HTML response | Confirmed | pass |
 
 ## Error Log
 | Timestamp | Error | Attempt | Resolution |
@@ -67,8 +90,8 @@
 ## 5-Question Reboot Check
 | Question | Answer |
 |----------|--------|
-| Where am I? | Phase 4: Review & Refinement complete |
-| Where am I going? | Commit the generated deliverables and wait for implementation direction |
-| What's the goal? | Produce a complete plan for the WhatsApp -> Evolution -> enrichment -> Trakt flow |
-| What have I learned? | The viable provider stack is known and the free OpenRouter vision chain has been enumerated |
-| What have I done? | Planned the architecture, documented the provider strategy, and prepared the repo for commit |
+| Where am I? | Phase 5: Implementation & Deployment complete |
+| Where am I going? | Next step is production hardening and real-message validation with the WhatsApp account |
+| What's the goal? | Deliver a working WhatsApp -> enrichment -> Trakt service and deploy it |
+| What have I learned? | The Dokploy deployment flow works reliably through GitHub push webhooks, and the target runtime is healthy under the path-based route |
+| What have I done? | Implemented, tested, published, deployed, and registered the Evolution webhook |

@@ -177,7 +177,7 @@ async def register_phone(
     profile = await service.upsert_phone_profile(normalize_phone(phone_number))
     profile.display_name = display_name
     await db.commit()
-    target = "trakt"
+    target = "../trakt"
     if settings.admin_shared_secret:
         target += f"?token={settings.admin_shared_secret}"
     return RedirectResponse(target, status_code=303)

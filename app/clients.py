@@ -1,0 +1,282 @@
+from __future__ import annotations
+
+import base64
+from datetime import UTC, datetime, timedelta
+from typing import Any
+from urllib.parse import urlencode
+
+import httpx
+from fastapi import HTTPException
+
+from app.config import Settings
+from app.schemas import EnrichedMedia, VisionCandidate
+from app.utils import compact_text, parse_json_response
+
+
+class EvolutionClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def _headers(self) -> dict[str, str]:
+        return {"apikey": self.settings.evolution_api_key, "Content-Type": "application/json"}
+
+    async def send_text(self, chat_jid: str, text: str) -> None:
+        payload = {
+            "number": chat_jid,
+            "text": text,
+            "textMessage": {"text": text},
+            "options": {"delay": 0, "presence": "composing"},
+        }
+        async with httpx.AsyncClient(base_url=self.settings.evolution_base_url, timeout=30.0) as client:
+            response = await client.post(
+                f"/message/sendText/{self.settings.evolution_instance}",
+                headers=self._headers(),
+                json=payload,
+            )
+            response.raise_for_status()
+
+    async def fetch_media_bytes(self, media_url: str) -> bytes:
+        async with httpx.AsyncClient(timeout=60.0, follow_redirects=True) as client:
+            response = await client.get(media_url)
+            response.raise_for_status()
+            return response.content
+
+
+class OpenRouterClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def _headers(self) -> dict[str, str]:
+        headers = {
+            "Authorization": f"Bearer {self.settings.openrouter_api_key}",
+            "Content-Type": "application/json",
+            "X-Title": self.settings.openrouter_app_name,
+        }
+        if self.settings.openrouter_site_url:
+            headers["HTTP-Referer"] = self.settings.openrouter_site_url
+        return headers
+
+    async def identify_title(self, image_bytes: bytes) -> VisionCandidate:
+        image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        prompt = (
+            "Identify the movie or TV series shown in the image. "
+            "Return JSON only with keys: detected_title, media_type, year, confidence, alt_titles, "
+            "visible_text, need_clarification. "
+            "media_type must be one of movie, series, unknown. "
+            "confidence must be between 0 and 1."
+        )
+
+        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=90.0) as client:
+            for model in [*self.settings.openrouter_vision_models, self.settings.openrouter_emergency_router]:
+                payload = {
+                    "model": model,
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {"type": "text", "text": prompt},
+                                {
+                                    "type": "image_url",
+                                    "image_url": {
+                                        "url": f"data:image/jpeg;base64,{image_b64}",
+                                    },
+                                },
+                            ],
+                        }
+                    ],
+                    "response_format": {"type": "json_object"},
+                }
+                try:
+                    response = await client.post("/chat/completions", headers=self._headers(), json=payload)
+                    response.raise_for_status()
+                    data = response.json()
+                    content = data["choices"][0]["message"]["content"]
+                    parsed = VisionCandidate.model_validate(parse_json_response(content))
+                    if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
+                        return parsed
+                except Exception:
+                    continue
+        raise HTTPException(status_code=422, detail="Could not identify a movie or series from the image.")
+
+
+class TMDbClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.settings.tmdb_api_token}",
+            "accept": "application/json",
+        }
+
+    async def search_and_enrich(self, candidate: VisionCandidate) -> EnrichedMedia:
+        async with httpx.AsyncClient(base_url="https://api.themoviedb.org/3", timeout=60.0) as client:
+            endpoint = "/search/multi"
+            params = {
+                "query": candidate.detected_title,
+                "language": self.settings.tmdb_language,
+                "include_adult": "false",
+            }
+            response = await client.get(endpoint, headers=self._headers(), params=params)
+            response.raise_for_status()
+            results = response.json().get("results", [])
+            scored = []
+            for result in results:
+                media_type = result.get("media_type")
+                if media_type not in {"movie", "tv"}:
+                    continue
+                score = 0.0
+                title = result.get("title") or result.get("name") or ""
+                if title.lower() == (candidate.detected_title or "").lower():
+                    score += 1.0
+                elif (candidate.detected_title or "").lower() in title.lower():
+                    score += 0.5
+                if candidate.media_type == "series" and media_type == "tv":
+                    score += 0.5
+                if candidate.media_type == "movie" and media_type == "movie":
+                    score += 0.5
+                result_year = (result.get("release_date") or result.get("first_air_date") or "")[:4]
+                if candidate.year and result_year and str(candidate.year) == result_year:
+                    score += 0.5
+                score += min((result.get("popularity") or 0) / 100, 0.5)
+                scored.append((score, result))
+            if not scored:
+                raise HTTPException(status_code=404, detail="No TMDb match found.")
+            scored.sort(key=lambda item: item[0], reverse=True)
+            best = scored[0][1]
+            media_type = "series" if best["media_type"] == "tv" else "movie"
+            item_id = best["id"]
+            detail_endpoint = f"/{'tv' if media_type == 'series' else 'movie'}/{item_id}"
+            details = await client.get(
+                detail_endpoint,
+                headers=self._headers(),
+                params={"language": self.settings.tmdb_language, "append_to_response": "external_ids,reviews,watch/providers"},
+            )
+            details.raise_for_status()
+            payload = details.json()
+            providers = (
+                (((payload.get("watch/providers") or {}).get("results") or {}).get(self.settings.tmdb_region) or {})
+            )
+            provider_lines = []
+            for key, label in (("flatrate", "assinatura"), ("rent", "aluguel"), ("buy", "compra")):
+                for entry in providers.get(key, [])[:3]:
+                    provider_lines.append(f"{entry['provider_name']} ({label})")
+            reviews = []
+            for review in (payload.get("reviews") or {}).get("results", [])[:3]:
+                content = compact_text(review.get("content"), 220)
+                if content:
+                    reviews.append(content)
+            return EnrichedMedia(
+                title=payload.get("title") or payload.get("name") or candidate.detected_title or "Unknown",
+                media_type=media_type,
+                year=int((payload.get("release_date") or payload.get("first_air_date") or "0000")[:4])
+                if (payload.get("release_date") or payload.get("first_air_date"))
+                else None,
+                tmdb_id=payload.get("id"),
+                imdb_id=(payload.get("external_ids") or {}).get("imdb_id"),
+                release_date=payload.get("release_date") or payload.get("first_air_date"),
+                overview=compact_text(payload.get("overview"), 420),
+                genres=[genre["name"] for genre in payload.get("genres", [])],
+                ratings={"TMDb": f"{payload.get('vote_average', 0):.1f}/10"},
+                providers=provider_lines,
+                reviews=reviews,
+                confidence=candidate.confidence,
+                payload=payload,
+            )
+
+
+class OMDbClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    async def attach_ratings(self, enriched: EnrichedMedia) -> EnrichedMedia:
+        if not enriched.imdb_id:
+            return enriched
+        async with httpx.AsyncClient(base_url="https://www.omdbapi.com", timeout=30.0) as client:
+            response = await client.get("/", params={"i": enriched.imdb_id, "apikey": self.settings.omdb_api_key})
+            response.raise_for_status()
+            payload = response.json()
+        ratings = dict(enriched.ratings)
+        for rating in payload.get("Ratings", []):
+            source = rating.get("Source")
+            value = rating.get("Value")
+            if source == "Internet Movie Database":
+                ratings["IMDb"] = value
+            elif source == "Rotten Tomatoes":
+                ratings["Rotten Tomatoes"] = value
+            elif source == "Metacritic":
+                ratings["Metacritic"] = value
+        enriched.ratings = ratings
+        return enriched
+
+
+class TraktClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    async def exchange_code(self, code: str) -> dict[str, Any]:
+        payload = {
+            "code": code,
+            "client_id": self.settings.trakt_client_id,
+            "client_secret": self.settings.trakt_client_secret,
+            "redirect_uri": self.settings.computed_trakt_redirect_uri,
+            "grant_type": "authorization_code",
+        }
+        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+            response = await client.post("/oauth/token", json=payload)
+            response.raise_for_status()
+            return response.json()
+
+    def build_authorize_url(self, state: str) -> str:
+        params = urlencode(
+            {
+                "response_type": "code",
+                "client_id": self.settings.trakt_client_id,
+                "redirect_uri": self.settings.computed_trakt_redirect_uri,
+                "state": state,
+            }
+        )
+        return f"https://trakt.tv/oauth/authorize?{params}"
+
+    async def refresh_token(self, refresh_token: str) -> dict[str, Any]:
+        payload = {
+            "refresh_token": refresh_token,
+            "client_id": self.settings.trakt_client_id,
+            "client_secret": self.settings.trakt_client_secret,
+            "redirect_uri": self.settings.computed_trakt_redirect_uri,
+            "grant_type": "refresh_token",
+        }
+        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+            response = await client.post("/oauth/token", json=payload)
+            response.raise_for_status()
+            return response.json()
+
+    async def get_profile(self, access_token: str) -> dict[str, Any]:
+        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+            response = await client.get("/users/settings", headers=self._headers(access_token))
+            response.raise_for_status()
+            return response.json()
+
+    async def ensure_fresh_tokens(self, connection: Any) -> tuple[str, str | None, datetime | None]:
+        if connection.expires_at and connection.expires_at > datetime.now(UTC) + timedelta(minutes=5):
+            return connection.access_token, connection.refresh_token, connection.expires_at
+        if not connection.refresh_token:
+            raise HTTPException(status_code=400, detail="Trakt account is not linked.")
+        refreshed = await self.refresh_token(connection.refresh_token)
+        expires_at = datetime.now(UTC) + timedelta(seconds=refreshed["expires_in"])
+        return refreshed["access_token"], refreshed.get("refresh_token"), expires_at
+
+    async def add_to_watchlist(self, access_token: str, enriched: EnrichedMedia) -> None:
+        item_key = "shows" if enriched.media_type == "series" else "movies"
+        payload = {item_key: [{"ids": {"tmdb": enriched.tmdb_id, "imdb": enriched.imdb_id}}]}
+        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+            response = await client.post("/sync/watchlist", headers=self._headers(access_token), json=payload)
+            response.raise_for_status()
+
+    def _headers(self, access_token: str) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {access_token}",
+            "trakt-api-version": "2",
+            "trakt-api-key": self.settings.trakt_client_id,
+        }

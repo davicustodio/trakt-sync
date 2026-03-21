@@ -66,6 +66,9 @@ class Settings(BaseSettings):
 
     image_command_ttl_minutes: int = 30
     save_command_ttl_hours: int = 24
+    evolution_polling_enabled: bool = True
+    evolution_polling_interval_seconds: int = 15
+    evolution_polling_limit: int = 12
 
     @computed_field
     @property

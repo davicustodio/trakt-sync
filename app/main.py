@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import asyncio
+import contextlib
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
@@ -11,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import canonical_owner_phone, is_authorized_self_chat
-from app.clients import TraktClient
+from app.clients import EvolutionClient, TraktClient
 from app.config import Settings, get_settings
 from app.db import SessionLocal, get_db_session, init_db
 from app.models import PhoneProfile, TraktConnection
@@ -21,12 +23,23 @@ from app.utils import decode_state, encode_state, extract_message_from_evolution
 from app.worker import process_x_info, process_x_save
 
 templates = Jinja2Templates(directory="app/templates")
+poller_task: asyncio.Task | None = None
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
     await init_db()
-    yield
+    global poller_task
+    settings = get_settings()
+    if settings.evolution_polling_enabled:
+        poller_task = asyncio.create_task(run_evolution_reconciler(settings))
+    try:
+        yield
+    finally:
+        if poller_task is not None:
+            poller_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poller_task
 
 
 app = FastAPI(title="trakt-sync", lifespan=lifespan)
@@ -75,6 +88,91 @@ async def dispatch_command(
         background_tasks.add_task(process_x_save, {}, chat_jid, requester_phone)
 
 
+async def dispatch_command_inline(command: str, chat_jid: str, requester_phone: str) -> None:
+    if command == "x-info":
+        await process_x_info({}, chat_jid, requester_phone)
+    elif command == "x-save":
+        await process_x_save({}, chat_jid, requester_phone)
+
+
+async def handle_normalized_message(
+    normalized: NormalizedMessage,
+    settings: Settings,
+    db: AsyncSession,
+    *,
+    background_tasks: BackgroundTasks | None = None,
+    force_inline_dispatch: bool = False,
+) -> dict[str, str | None]:
+    if settings.self_chat_only_mode and not is_authorized_self_chat(settings, normalized):
+        return {"status": "ignored", "reason": "self-chat-only"}
+    if settings.self_chat_only_mode:
+        normalized.requester_phone = canonical_owner_phone(settings)
+        normalized.sender_phone = canonical_owner_phone(settings)
+
+    service = MessageService(settings, db)
+    persisted = await service.persist_message(normalized)
+    if not persisted.created:
+        return {"status": "ignored", "reason": "duplicate-event"}
+
+    command = (normalized.text_body or "").strip().lower()
+    if command in {"x-info", "x-save"}:
+        if force_inline_dispatch or background_tasks is None:
+            await dispatch_command_inline(command, normalized.chat_jid, normalized.requester_phone)
+        else:
+            await dispatch_command(command, normalized.chat_jid, normalized.requester_phone, background_tasks)
+    return {"status": "accepted", "command": command or None}
+
+
+async def reconcile_recent_owner_messages(settings: Settings) -> None:
+    evolution = EvolutionClient(settings)
+    owner_jids = [f"{canonical_owner_phone(settings)}@s.whatsapp.net"]
+    if settings.evolution_owner_lid:
+        owner_jids.append(settings.evolution_owner_lid)
+
+    payloads: list[dict] = []
+    for remote_jid in dict.fromkeys(owner_jids):
+        for record in await evolution.fetch_recent_messages(remote_jid, settings.evolution_polling_limit):
+            payloads.append({"event": "MESSAGES_UPSERT", "data": record})
+
+    unique_payloads: dict[str, dict] = {}
+    for payload in payloads:
+        extracted = extract_message_from_evolution(payload)
+        if extracted is None:
+            continue
+        unique_payloads.setdefault(extracted.provider_message_id, payload)
+
+    for payload in sorted(unique_payloads.values(), key=lambda item: int((item.get("data") or {}).get("messageTimestamp") or 0)):
+        extracted = extract_message_from_evolution(payload)
+        if extracted is None:
+            continue
+        normalized = NormalizedMessage(
+            event_name=str(payload.get("event") or "MESSAGES_UPSERT"),
+            provider_message_id=extracted.provider_message_id,
+            chat_jid=extracted.chat_jid,
+            requester_phone=extracted.requester_phone,
+            sender_phone=extracted.sender_phone,
+            is_from_me=extracted.is_from_me,
+            message_type=extracted.message_type,
+            text_body=extracted.text_body,
+            media_url=extracted.media_url,
+            media_mime_type=extracted.media_mime_type,
+            raw_payload=payload,
+        )
+        async with SessionLocal() as db:
+            await handle_normalized_message(normalized, settings, db, force_inline_dispatch=True)
+
+
+async def run_evolution_reconciler(settings: Settings) -> None:
+    while True:
+        try:
+            await reconcile_recent_owner_messages(settings)
+        except asyncio.CancelledError:
+            raise
+        except Exception:
+            pass
+        await asyncio.sleep(max(settings.evolution_polling_interval_seconds, 5))
+
+
 @app.post("/webhooks/evolution/messages")
 async def evolution_webhook(
     request: Request,
@@ -106,23 +204,7 @@ async def evolution_webhook(
         raw_payload=payload,
     )
 
-    if settings.self_chat_only_mode and not is_authorized_self_chat(settings, normalized):
-        return JSONResponse({"status": "ignored", "reason": "self-chat-only"})
-    if settings.self_chat_only_mode:
-        normalized.requester_phone = canonical_owner_phone(settings)
-        normalized.sender_phone = canonical_owner_phone(settings)
-
-    service = MessageService(settings, db)
-    persisted = await service.persist_message(normalized)
-
-    if not persisted.created:
-        return JSONResponse({"status": "ignored", "reason": "duplicate-event"})
-
-    command = (normalized.text_body or "").strip().lower()
-    if command in {"x-info", "x-save"}:
-        await dispatch_command(command, normalized.chat_jid, normalized.requester_phone, background_tasks)
-
-    return JSONResponse({"status": "accepted", "command": command or None})
+    return JSONResponse(await handle_normalized_message(normalized, settings, db, background_tasks=background_tasks))
 
 
 @app.get("/admin/trakt", response_class=HTMLResponse)

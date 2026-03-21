@@ -3,8 +3,19 @@ import pytest
 
 from app.config import Settings
 from app.auth import is_authorized_self_chat
-from app.main import dispatch_command
+from app.main import dispatch_command, reconcile_recent_owner_messages
 from app.schemas import NormalizedMessage
+
+
+class DummyContextManager:
+    def __init__(self, value) -> None:
+        self.value = value
+
+    async def __aenter__(self):
+        return self.value
+
+    async def __aexit__(self, exc_type, exc, tb) -> None:
+        return None
 
 
 def build_message(**overrides: object) -> NormalizedMessage:
@@ -113,3 +124,54 @@ async def test_dispatch_command_schedules_x_save_background_task(monkeypatch) ->
     await dispatch_command("x-save", "5511999999999@s.whatsapp.net", "5511999999999", background_tasks)
 
     assert calls == [("fake_process_x_save", ({}, "5511999999999@s.whatsapp.net", "5511999999999"))]
+
+
+@pytest.mark.asyncio
+async def test_reconcile_recent_owner_messages_backfills_missed_webhooks(monkeypatch) -> None:
+    settings = Settings.model_construct(
+        evolution_base_url="https://example.com",
+        evolution_api_key="test",
+        evolution_instance="meu-whatsapp",
+        evolution_owner_phone="5519988343888",
+        evolution_owner_lid="121036657934449@lid",
+        openrouter_api_key="test",
+        tmdb_api_token="test",
+        omdb_api_key="test",
+        trakt_client_id="test",
+        trakt_client_secret="test",
+        self_chat_only_mode=True,
+        evolution_polling_limit=5,
+    )
+    handled: list[tuple[str, str, str | None]] = []
+
+    class FakeEvolutionClient:
+        def __init__(self, settings_obj) -> None:
+            self.settings = settings_obj
+
+        async def fetch_recent_messages(self, remote_jid: str, limit: int = 10):
+            if remote_jid == "121036657934449@lid":
+                return [
+                    {
+                        "key": {"id": "img-1", "fromMe": True, "remoteJid": "121036657934449@lid"},
+                        "messageTimestamp": 10,
+                        "message": {"imageMessage": {"url": "https://example.com/img.jpg", "mimetype": "image/jpeg"}},
+                    },
+                    {
+                        "key": {"id": "cmd-1", "fromMe": True, "remoteJid": "121036657934449@lid"},
+                        "messageTimestamp": 11,
+                        "message": {"conversation": "x-info"},
+                    },
+                ]
+            return []
+
+    async def fake_handle(normalized, settings_obj, db, **kwargs):
+        handled.append((normalized.provider_message_id, normalized.message_type, normalized.text_body))
+        return {"status": "accepted", "command": normalized.text_body}
+
+    monkeypatch.setattr("app.main.EvolutionClient", FakeEvolutionClient)
+    monkeypatch.setattr("app.main.handle_normalized_message", fake_handle)
+    monkeypatch.setattr("app.main.SessionLocal", lambda: DummyContextManager(object()))
+
+    await reconcile_recent_owner_messages(settings)
+
+    assert handled == [("img-1", "image", None), ("cmd-1", "text", "x-info")]

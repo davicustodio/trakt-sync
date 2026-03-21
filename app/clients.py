@@ -79,6 +79,19 @@ class EvolutionClient:
             response.raise_for_status()
             return response.content
 
+    async def fetch_recent_messages(self, remote_jid: str, limit: int = 10) -> list[dict[str, Any]]:
+        payload = {"where": {"key.remoteJid": remote_jid}, "limit": limit}
+        async with httpx.AsyncClient(base_url=self.settings.evolution_base_url, timeout=30.0) as client:
+            response = await client.post(
+                f"/chat/findMessages/{self.settings.evolution_instance}",
+                headers=self._headers(),
+                json=payload,
+            )
+            response.raise_for_status()
+            data = response.json()
+        records = ((data.get("messages") or {}).get("records") or []) if isinstance(data, dict) else []
+        return [record for record in records if isinstance(record, dict)]
+
 
 class OpenRouterClient:
     def __init__(self, settings: Settings) -> None:

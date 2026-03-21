@@ -95,6 +95,13 @@ class OpenRouterClient:
             headers["HTTP-Referer"] = self.settings.openrouter_site_url
         return headers
 
+    def _build_legacy_ocr_engine(self):
+        from rapidocr_onnxruntime import RapidOCR
+
+        self._ocr_backend = "rapidocr_onnxruntime"
+        self._ocr_engine = RapidOCR()
+        return self._ocr_engine
+
     async def identify_title(self, image_bytes: bytes) -> VisionCandidate:
         ocr_candidate = self._identify_title_from_ocr(image_bytes)
         if ocr_candidate is not None:
@@ -168,7 +175,19 @@ class OpenRouterClient:
                         if len(entry) >= 2 and entry[1].strip()
                     ]
             except Exception:
-                return None
+                if self._ocr_backend == "rapidocr":
+                    try:
+                        self._build_legacy_ocr_engine()
+                        result, _ = self._ocr_engine(temp_path)
+                        entries = [
+                            {"text": entry[1].strip(), "bbox": entry[0], "score": entry[2] if len(entry) >= 3 else 0.0}
+                            for entry in (result or [])
+                            if len(entry) >= 2 and entry[1].strip()
+                        ]
+                    except Exception:
+                        return None
+                else:
+                    return None
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(temp_path)

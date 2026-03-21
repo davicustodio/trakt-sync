@@ -210,6 +210,36 @@ async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> N
     assert candidate.year == 2006
 
 
+def test_identify_title_falls_back_to_legacy_ocr_backend() -> None:
+    client = OpenRouterClient(build_settings())
+    client._ocr_backend = "rapidocr"
+
+    class BrokenRapidOCR:
+        def __call__(self, path: str):
+            raise RuntimeError("rapidocr failed")
+
+    class LegacyRapidOCR:
+        def __call__(self, path: str):
+            return (
+                [
+                    (
+                        [[10, 10], [300, 10], [300, 60], [10, 60]],
+                        "INLAND EMPIRE",
+                        0.98,
+                    )
+                ],
+                None,
+            )
+
+    client._ocr_engine = BrokenRapidOCR()
+    client._build_legacy_ocr_engine = lambda: setattr(client, "_ocr_engine", LegacyRapidOCR()) or client._ocr_engine
+
+    candidate = client._identify_title_from_ocr(b"fake-image-bytes")
+
+    assert candidate is not None
+    assert candidate.detected_title == "Inland Empire"
+
+
 @pytest.mark.asyncio
 async def test_tmdb_prefers_unique_exact_title_and_year_match(monkeypatch) -> None:
     class FakeResponse:

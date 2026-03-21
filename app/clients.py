@@ -6,6 +6,7 @@ import contextlib
 import os
 import re
 import tempfile
+from io import BytesIO
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from urllib.parse import urlencode
@@ -14,7 +15,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import Settings
-from app.exceptions import AmbiguousTitleError
+from app.exceptions import AmbiguousTitleError, VisionIdentificationError
 from app.schemas import EnrichedMedia, VisionCandidate
 from app.utils import compact_text, normalize_phone, parse_json_response
 
@@ -108,6 +109,7 @@ class OpenRouterClient:
             return ocr_candidate
 
         image_b64 = base64.b64encode(image_bytes).decode("ascii")
+        attempts = ["ocr: no confident local text match"]
         prompt = (
             "Identify the movie or TV series shown in the image. "
             "Return JSON only with keys: detected_title, media_type, year, confidence, alt_titles, "
@@ -115,7 +117,8 @@ class OpenRouterClient:
             "media_type must be one of movie, series, unknown. "
             "confidence must be between 0 and 1."
         )
-        parsed = await self._query_candidate(image_b64, prompt, use_json_mode=True)
+        parsed, query_attempts = await self._query_candidate(image_b64, prompt, use_json_mode=True)
+        attempts.extend(query_attempts)
         if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
             return parsed
 
@@ -126,10 +129,11 @@ class OpenRouterClient:
             "If the title is explicitly written in the image, copy it to detected_title and use confidence >= 0.9. "
             "visible_text must contain the main readable text lines from the image."
         )
-        parsed = await self._query_candidate(image_b64, ocr_prompt, use_json_mode=False)
+        parsed, query_attempts = await self._query_candidate(image_b64, ocr_prompt, use_json_mode=False)
+        attempts.extend(query_attempts)
         if parsed.detected_title and parsed.confidence >= 0.75:
             return parsed
-        raise HTTPException(status_code=422, detail="Could not identify a movie or series from the image.")
+        raise VisionIdentificationError("Nao consegui identificar o titulo com confianca suficiente.", attempts)
 
     def _identify_title_from_ocr(self, image_bytes: bytes) -> VisionCandidate | None:
         if self._ocr_engine is None:
@@ -146,7 +150,69 @@ class OpenRouterClient:
                     return None
             self._ocr_engine = RapidOCR()
 
-        suffix = ".jpg"
+        for variant_name, candidate_bytes in self._build_ocr_variants(image_bytes):
+            entries = self._run_ocr(candidate_bytes)
+            lines = [entry["text"] for entry in entries]
+            if not lines:
+                continue
+
+            for line in lines:
+                match = re.search(r"(?P<title>[A-Za-z0-9' .,:!?-]{2,})\((?P<year>\d{4})\)", line)
+                if not match:
+                    continue
+                title = match.group("title").strip(" -")
+                year = int(match.group("year"))
+                if title:
+                    return VisionCandidate(
+                        detected_title=title,
+                        media_type="movie",
+                        year=year,
+                        confidence=0.98,
+                        visible_text=[*lines, f"ocr_variant={variant_name}"],
+                    )
+            title = self._guess_title_line(entries)
+            if title:
+                return VisionCandidate(
+                    detected_title=title,
+                    media_type="unknown",
+                    confidence=0.9,
+                    visible_text=[*lines, f"ocr_variant={variant_name}"],
+                )
+        return None
+
+    def _build_ocr_variants(self, image_bytes: bytes) -> list[tuple[str, bytes]]:
+        variants = [("original", image_bytes)]
+        try:
+            from PIL import Image, ImageEnhance, ImageFilter, ImageOps
+        except Exception:
+            return variants
+
+        try:
+            with Image.open(BytesIO(image_bytes)) as source:
+                image = source.convert("RGB")
+                width, height = image.size
+
+                grayscale = ImageOps.autocontrast(ImageOps.grayscale(image))
+                high_contrast = ImageEnhance.Contrast(grayscale).enhance(2.4)
+                sharpened = high_contrast.filter(ImageFilter.SHARPEN)
+                variants.append(("grayscale-contrast", self._encode_image_variant(sharpened)))
+
+                lower_crop = image.crop((0, max(int(height * 0.58), 0), width, height))
+                lower_gray = ImageOps.autocontrast(ImageOps.grayscale(lower_crop))
+                lower_large = lower_gray.resize((max(lower_crop.width * 2, 1), max(lower_crop.height * 2, 1)))
+                lower_sharp = ImageEnhance.Contrast(lower_large).enhance(2.8).filter(ImageFilter.SHARPEN)
+                variants.append(("bottom-crop-contrast", self._encode_image_variant(lower_sharp)))
+        except Exception:
+            return variants
+        return variants
+
+    def _encode_image_variant(self, image) -> bytes:
+        buffer = BytesIO()
+        image.save(buffer, format="PNG")
+        return buffer.getvalue()
+
+    def _run_ocr(self, image_bytes: bytes) -> list[dict[str, Any]]:
+        suffix = ".png"
         with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
             handle.write(image_bytes)
             temp_path = handle.name
@@ -154,7 +220,7 @@ class OpenRouterClient:
             try:
                 if self._ocr_backend == "rapidocr":
                     result = self._ocr_engine(temp_path)
-                    entries = [
+                    return [
                         {
                             "text": text.strip(),
                             "bbox": box.tolist() if hasattr(box, "tolist") else box,
@@ -167,57 +233,28 @@ class OpenRouterClient:
                         )
                         if text and text.strip()
                     ]
-                else:
+                result, _ = self._ocr_engine(temp_path)
+                return [
+                    {"text": entry[1].strip(), "bbox": entry[0], "score": entry[2] if len(entry) >= 3 else 0.0}
+                    for entry in (result or [])
+                    if len(entry) >= 2 and entry[1].strip()
+                ]
+            except Exception:
+                if self._ocr_backend != "rapidocr":
+                    return []
+                try:
+                    self._build_legacy_ocr_engine()
                     result, _ = self._ocr_engine(temp_path)
-                    entries = [
+                    return [
                         {"text": entry[1].strip(), "bbox": entry[0], "score": entry[2] if len(entry) >= 3 else 0.0}
                         for entry in (result or [])
                         if len(entry) >= 2 and entry[1].strip()
                     ]
-            except Exception:
-                if self._ocr_backend == "rapidocr":
-                    try:
-                        self._build_legacy_ocr_engine()
-                        result, _ = self._ocr_engine(temp_path)
-                        entries = [
-                            {"text": entry[1].strip(), "bbox": entry[0], "score": entry[2] if len(entry) >= 3 else 0.0}
-                            for entry in (result or [])
-                            if len(entry) >= 2 and entry[1].strip()
-                        ]
-                    except Exception:
-                        return None
-                else:
-                    return None
+                except Exception:
+                    return []
         finally:
             with contextlib.suppress(OSError):
                 os.unlink(temp_path)
-        lines = [entry["text"] for entry in entries]
-        if not lines:
-            return None
-
-        for line in lines:
-            match = re.search(r"(?P<title>[A-Za-z0-9' .,:!?-]{2,})\((?P<year>\d{4})\)", line)
-            if not match:
-                continue
-            title = match.group("title").strip(" -")
-            year = int(match.group("year"))
-            if title:
-                return VisionCandidate(
-                    detected_title=title,
-                    media_type="movie",
-                    year=year,
-                    confidence=0.98,
-                    visible_text=lines,
-                )
-        title = self._guess_title_line(entries)
-        if title:
-            return VisionCandidate(
-                detected_title=title,
-                media_type="unknown",
-                confidence=0.9,
-                visible_text=lines,
-            )
-        return None
 
     def _guess_title_line(self, entries: list[dict[str, Any]]) -> str | None:
         stopwords = {
@@ -281,9 +318,14 @@ class OpenRouterClient:
             best_line = cleaned.title() if cleaned.isupper() else cleaned
         return best_line
 
-    async def _query_candidate(self, image_b64: str, prompt: str, *, use_json_mode: bool) -> VisionCandidate:
+    async def _query_candidate(self, image_b64: str, prompt: str, *, use_json_mode: bool) -> tuple[VisionCandidate, list[str]]:
+        attempts: list[str] = []
+        model_sequence = [*self.settings.openrouter_vision_models]
+        if self.settings.openrouter_enable_paid_fallback:
+            model_sequence.extend(self.settings.openrouter_paid_vision_models)
+        model_sequence.append(self.settings.openrouter_emergency_router)
         async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=90.0) as client:
-            for model in [*self.settings.openrouter_vision_models, self.settings.openrouter_emergency_router]:
+            for model in model_sequence:
                 payload = {
                     "model": model,
                     "messages": [
@@ -310,10 +352,15 @@ class OpenRouterClient:
                     content = data["choices"][0]["message"]["content"]
                     parsed = VisionCandidate.model_validate(parse_json_response(content))
                     if parsed.detected_title:
-                        return parsed
-                except Exception:
+                        attempts.append(
+                            f"{model}: {parsed.detected_title} (confidence={parsed.confidence:.2f}, type={parsed.media_type})"
+                        )
+                        return parsed, attempts
+                    attempts.append(f"{model}: empty title")
+                except Exception as exc:
+                    attempts.append(f"{model}: {exc.__class__.__name__}")
                     continue
-        return VisionCandidate()
+        return VisionCandidate(), attempts
 
 
 class TMDbClient:

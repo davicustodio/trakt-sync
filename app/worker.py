@@ -1,11 +1,12 @@
 from __future__ import annotations
 
 from arq import func
+from fastapi import HTTPException
 from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
-from app.exceptions import AmbiguousTitleError
+from app.exceptions import AmbiguousTitleError, VisionIdentificationError
 from app.models import PhoneProfile, TraktConnection
 from app.queue import redis_settings
 from app.services import MessageService, PipelineService
@@ -27,8 +28,10 @@ async def process_x_info(_: dict, chat_jid: str, requester_phone: str) -> None:
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_whatsapp_reply(enriched))
         except AmbiguousTitleError as exc:
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_ambiguous_reply(exc.options))
+        except VisionIdentificationError as exc:
+            await pipeline.evolution.send_text(chat_jid, _format_x_info_failure(exc))
         except Exception as exc:  # noqa: BLE001
-            await pipeline.evolution.send_text(chat_jid, f"Falha ao analisar a imagem: {exc}")
+            await pipeline.evolution.send_text(chat_jid, _format_x_info_failure(exc))
 
 
 async def process_x_save(_: dict, chat_jid: str, requester_phone: str) -> None:
@@ -60,6 +63,27 @@ async def process_x_save(_: dict, chat_jid: str, requester_phone: str) -> None:
             await pipeline.evolution.send_text(chat_jid, f"{identified.title} foi salvo na sua watchlist do Trakt.")
         except Exception as exc:  # noqa: BLE001
             await pipeline.evolution.send_text(chat_jid, f"Falha ao salvar no Trakt: {exc}")
+
+
+def _format_x_info_failure(exc: Exception) -> str:
+    if isinstance(exc, VisionIdentificationError):
+        attempts = exc.attempts[:6]
+        lines = [
+            "Falha ao analisar a imagem para o x-info.",
+            f"Motivo: {exc.reason}",
+        ]
+        if attempts:
+            lines.extend(["Modelos e etapas testados:", *[f"- {attempt}" for attempt in attempts]])
+        lines.extend(
+            [
+                "",
+                "Se esta imagem for um print do Instagram/WhatsApp, envie uma captura mais fechada no poster ou frame.",
+            ]
+        )
+        return "\n".join(lines)
+    if isinstance(exc, HTTPException):
+        return f"Falha ao analisar a imagem para o x-info. Motivo: {exc.detail}"
+    return f"Falha ao analisar a imagem para o x-info. Motivo: {exc}"
 
 
 class WorkerSettings:

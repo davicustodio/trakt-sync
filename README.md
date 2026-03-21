@@ -12,6 +12,7 @@ FastAPI service for a WhatsApp media assistant built around Evolution API, OpenR
 - Falls back to inline command execution when Redis is reachable but no ARQ worker is healthy.
 - Returns 2-3 likely titles instead of forcing a false positive when TMDb is ambiguous.
 - Uses a deterministic free-model OpenRouter vision fallback chain.
+- Escalates from free models to paid vision models when configured, and reports model/error diagnostics back to WhatsApp on `x-info` failures.
 - Enriches the title with TMDb, OMDb, and Brazil streaming availability.
 - Supports `x-save` to add the latest identified title to the requester's Trakt watchlist.
 - Includes a small admin UI for linking a phone number to Trakt OAuth.

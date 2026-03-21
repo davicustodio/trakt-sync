@@ -199,8 +199,11 @@ async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> N
 
     client._ocr_engine = boom
 
-    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool) -> VisionCandidate:
-        return VisionCandidate(detected_title="Inland Empire", media_type="movie", year=2006, confidence=0.95)
+    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool) -> tuple[VisionCandidate, list[str]]:
+        return (
+            VisionCandidate(detected_title="Inland Empire", media_type="movie", year=2006, confidence=0.95),
+            ["google/gemini-2.5-flash: Inland Empire"],
+        )
 
     monkeypatch.setattr(client, "_query_candidate", fake_query_candidate)
 
@@ -208,6 +211,60 @@ async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> N
 
     assert candidate.detected_title == "Inland Empire"
     assert candidate.year == 2006
+
+
+@pytest.mark.asyncio
+async def test_query_candidate_uses_paid_fallback_after_free_models(monkeypatch) -> None:
+    requested_models: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+        def raise_for_status(self) -> None:
+            if self.model.endswith(":free"):
+                raise RuntimeError("free model failed")
+
+        def json(self) -> dict:
+            return {
+                "choices": [
+                    {
+                        "message": {
+                            "content": '{"detected_title":"Inland Empire","media_type":"movie","year":2006,"confidence":0.97}'
+                        }
+                    }
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, path: str, headers: dict[str, str], json: dict[str, object]) -> FakeResponse:
+            requested_models.append(str(json["model"]))
+            return FakeResponse(str(json["model"]))
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    settings = build_settings()
+    settings.openrouter_vision_models = ["google/gemma-3-27b-it:free"]
+    settings.openrouter_paid_vision_models = ["google/gemini-2.5-flash"]
+    client = OpenRouterClient(settings)
+
+    candidate, attempts = await client._query_candidate("ZmFrZQ==", "prompt", use_json_mode=True)
+
+    assert requested_models == ["google/gemma-3-27b-it:free", "google/gemini-2.5-flash"]
+    assert candidate.detected_title == "Inland Empire"
+    assert attempts == [
+        "google/gemma-3-27b-it:free: RuntimeError",
+        "google/gemini-2.5-flash: Inland Empire (confidence=0.97, type=movie)",
+    ]
 
 
 def test_identify_title_falls_back_to_legacy_ocr_backend() -> None:

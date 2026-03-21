@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.exceptions import AmbiguousTitleError
+from app.exceptions import AmbiguousTitleError, VisionIdentificationError
 from app.worker import process_x_info, process_x_save
 
 
@@ -143,3 +143,51 @@ async def test_process_x_save_uses_identified_ids_without_tmdb_lookup(monkeypatc
     assert added_payloads == [("tt0110912", 680, "fresh-token")]
     assert fake_db.committed is True
     assert sent_messages == ["Pulp Fiction foi salvo na sua watchlist do Trakt."]
+
+
+@pytest.mark.asyncio
+async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypatch) -> None:
+    sent_messages: list[str] = []
+
+    class FakeMessageService:
+        def __init__(self, settings, db) -> None:
+            pass
+
+        async def find_latest_image(self, chat_jid: str, requester_phone: str | None = None):
+            return SimpleNamespace(
+                provider_message_id="abc123",
+                media_url="https://example.com/poster.jpg",
+                chat_jid=chat_jid,
+                requester_phone="5511",
+            )
+
+    class FakeEvolution:
+        async def send_text(self, chat_jid: str, text: str) -> None:
+            sent_messages.append(text)
+
+    class FakePipelineService:
+        def __init__(self, settings) -> None:
+            self.evolution = FakeEvolution()
+
+        async def enrich_from_image(self, provider_message_id: str, media_url: str | None = None):
+            raise VisionIdentificationError(
+                "Nao consegui identificar o titulo com confianca suficiente.",
+                ["ocr: no confident local text match", "google/gemini-2.5-flash: RuntimeError"],
+            )
+
+    monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
+    monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
+    monkeypatch.setattr("app.worker.PipelineService", FakePipelineService)
+
+    await process_x_info({}, "5519988343888@s.whatsapp.net", "5519988343888")
+
+    assert sent_messages == [
+        "Falha ao analisar a imagem para o x-info.\n"
+        "Motivo: Nao consegui identificar o titulo com confianca suficiente.\n"
+        "Modelos e etapas testados:\n"
+        "- ocr: no confident local text match\n"
+        "- google/gemini-2.5-flash: RuntimeError\n"
+        "\n"
+        "Se esta imagem for um print do Instagram/WhatsApp, envie uma captura mais fechada no poster ou frame."
+    ]

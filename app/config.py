@@ -42,6 +42,14 @@ class Settings(BaseSettings):
             "google/gemma-3-4b-it:free",
         ]
     )
+    openrouter_enable_paid_fallback: bool = True
+    openrouter_paid_vision_models: list[str] = Field(
+        default_factory=lambda: [
+            "google/gemini-2.5-flash",
+            "openai/gpt-4.1-mini",
+            "anthropic/claude-3.7-sonnet",
+        ]
+    )
     openrouter_emergency_router: str = "openrouter/free"
     openrouter_confidence_threshold: float = 0.80
 

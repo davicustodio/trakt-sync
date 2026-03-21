@@ -36,6 +36,8 @@
 - Evolution accepts self-chat test payloads through `/message/sendMedia/{instance}` and `/message/sendText/{instance}`, and conversation history can be inspected through `/chat/findMessages/{instance}`.
 - The `imageMessage.url` coming from WhatsApp is not reliably a directly readable image for OCR; downloading that URL can return the encrypted media blob as `application/octet-stream`.
 - Evolution's official `POST /chat/getBase64FromMediaMessage/{instance}` endpoint returns the decrypted media bytes keyed by the message ID and is the correct source for image analysis.
+- Local validation shows OpenRouter can identify the screenshot when fed the decrypted image bytes, so the remaining production gap is the OCR/runtime layer rather than the prompt or TMDb search path.
+- The newer `rapidocr` package bundles the OCR model assets more cleanly for containerized installs and is a better first-choice backend than the deprecated `rapidocr_onnxruntime`.
 
 ## Technical Decisions
 | Decision | Rationale |

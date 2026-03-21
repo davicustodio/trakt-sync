@@ -73,6 +73,7 @@ class OpenRouterClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._ocr_engine = None
+        self._ocr_backend: str | None = None
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -116,22 +117,32 @@ class OpenRouterClient:
     def _identify_title_from_ocr(self, image_bytes: bytes) -> VisionCandidate | None:
         if self._ocr_engine is None:
             try:
-                from rapidocr_onnxruntime import RapidOCR
+                from rapidocr import RapidOCR
+
+                self._ocr_backend = "rapidocr"
             except Exception:
-                return None
+                try:
+                    from rapidocr_onnxruntime import RapidOCR
+
+                    self._ocr_backend = "rapidocr_onnxruntime"
+                except Exception:
+                    return None
             self._ocr_engine = RapidOCR()
 
-        suffix = ".jpg"
-        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-            handle.write(image_bytes)
-            temp_path = handle.name
-        try:
-            result, _ = self._ocr_engine(temp_path)
-        finally:
-            with contextlib.suppress(OSError):
-                os.unlink(temp_path)
-
-        lines = [entry[1].strip() for entry in (result or []) if len(entry) >= 2 and entry[1].strip()]
+        if self._ocr_backend == "rapidocr":
+            result = self._ocr_engine(image_bytes)
+            lines = [text.strip() for text in getattr(result, "txts", ()) if text and text.strip()]
+        else:
+            suffix = ".jpg"
+            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+                handle.write(image_bytes)
+                temp_path = handle.name
+            try:
+                result, _ = self._ocr_engine(temp_path)
+            finally:
+                with contextlib.suppress(OSError):
+                    os.unlink(temp_path)
+            lines = [entry[1].strip() for entry in (result or []) if len(entry) >= 2 and entry[1].strip()]
         if not lines:
             return None
 

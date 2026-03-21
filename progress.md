@@ -150,3 +150,5 @@
   - Reproduced the remaining failure in production and isolated it to media retrieval: the WhatsApp CDN URL was returning encrypted bytes instead of a decodable image.
   - Validated Evolution's `getBase64FromMediaMessage` endpoint against the live instance and patched the app to fetch decrypted media by `provider_message_id` before falling back to the raw URL.
   - Re-ran the targeted suite after the media retrieval fix and confirmed all tests passed.
+  - Confirmed locally that OpenRouter can identify the screenshot when OCR is bypassed, which narrowed the production issue to the OCR runtime path.
+  - Added `rapidocr` as the preferred OCR backend, keeping `rapidocr_onnxruntime` only as a compatibility fallback, and revalidated the targeted suite.

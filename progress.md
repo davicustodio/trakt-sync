@@ -95,3 +95,32 @@
 | What's the goal? | Deliver a working WhatsApp -> enrichment -> Trakt service and deploy it |
 | What have I learned? | The Dokploy deployment flow works reliably through GitHub push webhooks, and the target runtime is healthy under the path-based route |
 | What have I done? | Implemented, tested, published, deployed, and registered the Evolution webhook |
+
+## Session: 2026-03-21
+
+### Phase 6: Hardening & Acceptance
+- **Status:** in_progress
+- Actions taken:
+  - Enforced strict owner self-chat authorization ahead of persistence and dispatch.
+  - Added duplicate-event suppression based on `provider_message_id`.
+  - Added ambiguity handling so close TMDb matches return a shortlist instead of a forced answer.
+  - Simplified `x-save` to reuse the already confirmed TMDb/IMDb IDs instead of re-searching the title.
+  - Installed the local project dependencies and expanded the test suite for webhook, pipeline, and worker flows.
+- Files created/modified:
+  - `app/exceptions.py` (created)
+  - `app/clients.py` (updated)
+  - `app/main.py` (updated)
+  - `app/services.py` (updated)
+  - `app/worker.py` (updated)
+  - `tests/test_pipeline.py` (created)
+  - `tests/test_webhook.py` (created)
+  - `tests/test_worker.py` (created)
+  - `README.md` (updated)
+  - `task_plan.md` (updated)
+  - `findings.md` (updated)
+  - `progress.md` (updated)
+
+## Test Results
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Full unit suite | `pytest -q` | Webhook, worker, utils, and pipeline pass | 13 passed | pass |

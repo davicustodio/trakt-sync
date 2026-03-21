@@ -4,7 +4,7 @@
 Produce a complete implementation plan for a Dokploy2-hosted service that receives WhatsApp media events from Evolution API, identifies movie/series posters or frames with an OpenRouter vision model, enriches the title with ratings/reviews/streaming availability in Brazil, replies on WhatsApp, and saves to Trakt watchlist on command.
 
 ## Current Phase
-Phase 5
+Phase 6
 
 ## Phases
 ### Phase 1: Requirements & Discovery
@@ -37,6 +37,14 @@ Phase 5
 - [x] Publish the repository and deploy the application on Dokploy
 - **Status:** complete
 
+### Phase 6: Hardening & Acceptance
+- [x] Enforce strict self-chat authorization for owner-only commands
+- [x] Prevent duplicate webhook retries from enqueueing commands again
+- [x] Handle ambiguous identification responses without false positives
+- [x] Expand automated tests for webhook and worker flows
+- [ ] Publish the hardened build and validate production behavior again
+- **Status:** in_progress
+
 ## Key Questions
 1. Which webhook/event shapes are available from the Evolution API instance managed inside Dokploy2?
 2. Which metadata sources are most reliable for ratings, reviews, and Brazil streaming availability with acceptable cost?
@@ -53,6 +61,8 @@ Phase 5
 | Use a deterministic OpenRouter free-model cascade instead of `openrouter/free` | Deterministic fallbacks are easier to debug, measure, and tune in production |
 | Implement the service as FastAPI with optional inline fallback when Redis is unavailable | Keeps the architecture queue-friendly while allowing a one-container Dokploy MVP |
 | Deploy under `https://joaocat.duckdns.org/trakt-sync` instead of a new subdomain | The root host already resolves, avoiding DNS setup blocking the rollout |
+| Ignore duplicate provider message IDs before command dispatch | This is the simplest way to preserve webhook idempotency for retries |
+| Return ambiguity options instead of auto-selecting close TMDb matches | Better to ask for a clearer image than save or reply with a false positive |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

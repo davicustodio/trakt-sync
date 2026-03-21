@@ -24,6 +24,9 @@
 - OMDb is viable as the ratings bridge for IMDb, Rotten Tomatoes, and Metacritic, but the free plan is limited to 1,000 requests per day.
 - Trakt's official contracts expose `POST /sync/watchlist`; OAuth token flows require `client_id`, `client_secret`, and `redirect_uri`.
 - The user has already provided Trakt `client_id` and `client_secret` out-of-band; these values should not be persisted in repository files.
+- The current V1 must reject every message that is not an owner self-chat event before persistence or queue dispatch.
+- Webhook idempotency matters because Evolution can resend the same provider message ID; duplicate command events must not enqueue work twice.
+- The user prefers ambiguity to be surfaced as 2-3 likely options rather than forcing a weak title match.
 
 ## Technical Decisions
 | Decision | Rationale |
@@ -32,6 +35,8 @@
 | Prefer a deterministic free-model cascade over the `openrouter/free` router | Easier to observe, benchmark, and debug in a webhook workflow |
 | Rank free models by expected vision usefulness rather than by creation date | The webhook needs reliable image recognition, not novelty |
 | Do not persist user secrets in docs or planning files | Repository docs should contain only env variable names, never real credentials |
+| Treat duplicate provider message IDs as a no-op before worker dispatch | Prevents repeated `x-info`/`x-save` executions on webhook retries |
+| Reuse the confirmed identified IDs for `x-save` | Avoids an unnecessary second TMDb lookup and reduces mismatch risk |
 
 ## Issues Encountered
 | Issue | Resolution |

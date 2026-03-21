@@ -9,6 +9,7 @@ import httpx
 from fastapi import HTTPException
 
 from app.config import Settings
+from app.exceptions import AmbiguousTitleError
 from app.schemas import EnrichedMedia, VisionCandidate
 from app.utils import compact_text, parse_json_response
 
@@ -143,6 +144,7 @@ class TMDbClient:
             if not scored:
                 raise HTTPException(status_code=404, detail="No TMDb match found.")
             scored.sort(key=lambda item: item[0], reverse=True)
+            self._raise_for_ambiguity(scored)
             best = scored[0][1]
             media_type = "series" if best["media_type"] == "tv" else "movie"
             item_id = best["id"]
@@ -183,6 +185,29 @@ class TMDbClient:
                 confidence=candidate.confidence,
                 payload=payload,
             )
+
+    def _raise_for_ambiguity(self, scored: list[tuple[float, dict[str, Any]]]) -> None:
+        if len(scored) < 2:
+            return
+        top_score, top_result = scored[0]
+        second_score, second_result = scored[1]
+        title_a = top_result.get("title") or top_result.get("name") or "Desconhecido"
+        title_b = second_result.get("title") or second_result.get("name") or "Desconhecido"
+        year_a = (top_result.get("release_date") or top_result.get("first_air_date") or "")[:4]
+        year_b = (second_result.get("release_date") or second_result.get("first_air_date") or "")[:4]
+        if title_a == title_b and year_a == year_b:
+            return
+        if top_score - second_score >= 0.35:
+            return
+        options: list[str] = []
+        for _, result in scored[:3]:
+            title = result.get("title") or result.get("name") or "Desconhecido"
+            year = (result.get("release_date") or result.get("first_air_date") or "")[:4]
+            media_type = "Serie" if result.get("media_type") == "tv" else "Filme"
+            label = f"{title} ({year or 'N/A'}) - {media_type}"
+            if label not in options:
+                options.append(label)
+        raise AmbiguousTitleError(options)
 
 
 class OMDbClient:

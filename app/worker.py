@@ -5,6 +5,7 @@ from sqlalchemy import select
 
 from app.config import get_settings
 from app.db import SessionLocal, init_db
+from app.exceptions import AmbiguousTitleError
 from app.models import PhoneProfile, TraktConnection
 from app.queue import redis_settings
 from app.services import MessageService, PipelineService
@@ -30,6 +31,8 @@ async def process_x_info(_: dict, chat_jid: str, requester_phone: str) -> None:
             enriched = await pipeline.enrich_from_image(message.media_url)
             await service.save_identified_media(message, enriched)
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_whatsapp_reply(enriched))
+        except AmbiguousTitleError as exc:
+            await pipeline.evolution.send_text(chat_jid, await pipeline.format_ambiguous_reply(exc.options))
         except Exception as exc:  # noqa: BLE001
             await pipeline.evolution.send_text(chat_jid, f"Falha ao analisar a imagem: {exc}")
 
@@ -55,20 +58,9 @@ async def process_x_save(_: dict, chat_jid: str, requester_phone: str) -> None:
             connection.access_token = access_token
             connection.refresh_token = refresh_token
             connection.expires_at = expires_at
-            enriched = await pipeline.tmdb.search_and_enrich(
-                type(
-                    "Candidate",
-                    (),
-                    {
-                        "detected_title": identified.title,
-                        "media_type": identified.media_type,
-                        "year": identified.year,
-                        "confidence": identified.confidence,
-                    },
-                )()
-            )
-            enriched.imdb_id = identified.imdb_id or enriched.imdb_id
-            enriched.tmdb_id = identified.tmdb_id or enriched.tmdb_id
+            enriched = pipeline.build_watchlist_item(identified)
+            if not enriched.tmdb_id and not enriched.imdb_id:
+                raise ValueError("Titulo identificado sem IDs externos para salvar no Trakt.")
             await pipeline.trakt.add_to_watchlist(access_token, enriched)
             await db.commit()
             await pipeline.evolution.send_text(chat_jid, f"{identified.title} foi salvo na sua watchlist do Trakt.")

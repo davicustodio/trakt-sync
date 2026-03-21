@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import Any
+from dataclasses import dataclass
 
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -11,6 +12,12 @@ from app.clients import EvolutionClient, OMDbClient, OpenRouterClient, TMDbClien
 from app.config import Settings
 from app.models import ChatState, IdentifiedMedia, IncomingMessage, PhoneProfile, TraktConnection
 from app.schemas import EnrichedMedia, NormalizedMessage
+
+
+@dataclass(slots=True)
+class PersistMessageResult:
+    message: IncomingMessage
+    created: bool
 
 
 class MessageService:
@@ -29,13 +36,13 @@ class MessageService:
             profile.whatsapp_jid = whatsapp_jid
         return profile
 
-    async def persist_message(self, normalized: NormalizedMessage) -> IncomingMessage:
+    async def persist_message(self, normalized: NormalizedMessage) -> PersistMessageResult:
         existing = await self.db.execute(
             select(IncomingMessage).where(IncomingMessage.provider_message_id == normalized.provider_message_id)
         )
         message = existing.scalar_one_or_none()
         if message:
-            return message
+            return PersistMessageResult(message=message, created=False)
         await self.upsert_phone_profile(normalized.requester_phone, normalized.chat_jid)
         message = IncomingMessage(
             provider_message_id=normalized.provider_message_id,
@@ -63,7 +70,7 @@ class MessageService:
         if normalized.message_type == "image":
             state.last_image_message_id = message.id
         await self.db.commit()
-        return message
+        return PersistMessageResult(message=message, created=True)
 
     async def find_latest_image(self, chat_jid: str) -> IncomingMessage:
         min_time = datetime.now(UTC) - timedelta(minutes=self.settings.image_command_ttl_minutes)
@@ -138,11 +145,12 @@ class PipelineService:
         ]
         review_lines = [f"{index + 1}. {review}" for index, review in enumerate(enriched.reviews[:3])]
         genres = ", ".join(enriched.genres[:4]) if enriched.genres else "Nao informado"
+        release_date = self._format_date(enriched.release_date)
         return "\n".join(
             [
                 f"{enriched.title} ({enriched.year or 'N/A'})",
                 f"Tipo: {'Serie' if enriched.media_type == 'series' else 'Filme'}",
-                f"Lancamento: {enriched.release_date or 'Nao informado'}",
+                f"Lancamento: {release_date}",
                 f"Generos: {genres}",
                 "",
                 "Notas",
@@ -161,6 +169,39 @@ class PipelineService:
                 "- x-save",
             ]
         )
+
+    async def format_ambiguous_reply(self, options: list[str]) -> str:
+        lines = [f"{index + 1}. {option}" for index, option in enumerate(options[:3])]
+        return "\n".join(
+            [
+                "Nao consegui confirmar com seguranca qual titulo esta na imagem.",
+                "As melhores opcoes foram:",
+                *lines,
+                "",
+                "Envie uma imagem mais clara ou com mais contexto e depois use x-info novamente.",
+            ]
+        )
+
+    def build_watchlist_item(self, identified: IdentifiedMedia) -> EnrichedMedia:
+        return EnrichedMedia(
+            title=identified.title,
+            media_type=identified.media_type,
+            year=identified.year,
+            tmdb_id=identified.tmdb_id,
+            imdb_id=identified.imdb_id,
+            overview=identified.overview,
+            confidence=identified.confidence,
+            payload=identified.payload,
+        )
+
+    def _format_date(self, value: str | None) -> str:
+        if not value:
+            return "Nao informado"
+        try:
+            parsed = datetime.strptime(value, "%Y-%m-%d")
+            return parsed.strftime("%d/%m/%Y")
+        except ValueError:
+            return value
 
     async def persist_trakt_callback(
         self, db: AsyncSession, phone_number: str, token_payload: dict[str, Any]

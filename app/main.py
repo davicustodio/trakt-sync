@@ -99,7 +99,10 @@ async def evolution_webhook(
         return JSONResponse({"status": "ignored", "reason": "self-chat-only"})
 
     service = MessageService(settings, db)
-    await service.persist_message(normalized)
+    persisted = await service.persist_message(normalized)
+
+    if not persisted.created:
+        return JSONResponse({"status": "ignored", "reason": "duplicate-event"})
 
     command = (normalized.text_body or "").strip().lower()
     try:

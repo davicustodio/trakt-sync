@@ -100,7 +100,7 @@ def test_webhook_schedules_x_info_for_owner_self_chat(monkeypatch) -> None:
     async def fake_persist(self, normalized: NormalizedMessage) -> PersistMessageResult:
         return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
 
-    async def fake_dispatch(command: str, chat_jid: str, requester_phone: str) -> None:
+    async def fake_dispatch(command: str, chat_jid: str, requester_phone: str, background_tasks) -> None:
         scheduled.append((chat_jid, requester_phone))
 
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
@@ -125,7 +125,7 @@ def test_webhook_schedules_x_info_for_owner_lid_chat(monkeypatch) -> None:
         assert normalized.sender_phone == "5519988343888"
         return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
 
-    async def fake_dispatch(command: str, chat_jid: str, requester_phone: str) -> None:
+    async def fake_dispatch(command: str, chat_jid: str, requester_phone: str, background_tasks) -> None:
         scheduled.append((chat_jid, requester_phone))
 
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)

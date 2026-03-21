@@ -1,3 +1,4 @@
+from fastapi import BackgroundTasks
 import pytest
 
 from app.config import Settings
@@ -77,28 +78,38 @@ def test_is_authorized_self_chat_accepts_owner_lid_message() -> None:
 
 
 @pytest.mark.asyncio
-async def test_dispatch_command_runs_x_info_inline(monkeypatch) -> None:
-    calls: list[tuple[str, str]] = []
+async def test_dispatch_command_schedules_x_info_background_task(monkeypatch) -> None:
+    calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def fake_process_x_info(ctx: dict, chat_jid: str, requester_phone: str) -> None:
-        calls.append((chat_jid, requester_phone))
+        return None
+
+    def fake_add_task(func, *args, **kwargs) -> None:
+        calls.append((func.__name__, args))
 
     monkeypatch.setattr("app.main.process_x_info", fake_process_x_info)
+    background_tasks = BackgroundTasks()
+    monkeypatch.setattr(background_tasks, "add_task", fake_add_task)
 
-    await dispatch_command("x-info", "5511999999999@s.whatsapp.net", "5511999999999")
+    await dispatch_command("x-info", "5511999999999@s.whatsapp.net", "5511999999999", background_tasks)
 
-    assert calls == [("5511999999999@s.whatsapp.net", "5511999999999")]
+    assert calls == [("fake_process_x_info", ({}, "5511999999999@s.whatsapp.net", "5511999999999"))]
 
 
 @pytest.mark.asyncio
-async def test_dispatch_command_runs_x_save_inline(monkeypatch) -> None:
-    calls: list[tuple[str, str]] = []
+async def test_dispatch_command_schedules_x_save_background_task(monkeypatch) -> None:
+    calls: list[tuple[str, tuple[object, ...]]] = []
 
     async def fake_process_x_save(ctx: dict, chat_jid: str, requester_phone: str) -> None:
-        calls.append((chat_jid, requester_phone))
+        return None
+
+    def fake_add_task(func, *args, **kwargs) -> None:
+        calls.append((func.__name__, args))
 
     monkeypatch.setattr("app.main.process_x_save", fake_process_x_save)
+    background_tasks = BackgroundTasks()
+    monkeypatch.setattr(background_tasks, "add_task", fake_add_task)
 
-    await dispatch_command("x-save", "5511999999999@s.whatsapp.net", "5511999999999")
+    await dispatch_command("x-save", "5511999999999@s.whatsapp.net", "5511999999999", background_tasks)
 
-    assert calls == [("5511999999999@s.whatsapp.net", "5511999999999")]
+    assert calls == [("fake_process_x_save", ({}, "5511999999999@s.whatsapp.net", "5511999999999"))]

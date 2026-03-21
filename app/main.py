@@ -4,7 +4,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
 
-from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
+from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
@@ -67,16 +67,18 @@ async def dispatch_command(
     command: str,
     chat_jid: str,
     requester_phone: str,
+    background_tasks: BackgroundTasks,
 ) -> None:
     if command == "x-info":
-        await process_x_info({}, chat_jid, requester_phone)
+        background_tasks.add_task(process_x_info, {}, chat_jid, requester_phone)
     elif command == "x-save":
-        await process_x_save({}, chat_jid, requester_phone)
+        background_tasks.add_task(process_x_save, {}, chat_jid, requester_phone)
 
 
 @app.post("/webhooks/evolution/messages")
 async def evolution_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     settings: Annotated[Settings, Depends(settings_dep)],
     db: Annotated[AsyncSession, Depends(db_dep)],
 ) -> JSONResponse:
@@ -118,7 +120,7 @@ async def evolution_webhook(
 
     command = (normalized.text_body or "").strip().lower()
     if command in {"x-info", "x-save"}:
-        await dispatch_command(command, normalized.chat_jid, normalized.requester_phone)
+        await dispatch_command(command, normalized.chat_jid, normalized.requester_phone, background_tasks)
 
     return JSONResponse({"status": "accepted", "command": command or None})
 

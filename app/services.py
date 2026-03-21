@@ -72,7 +72,7 @@ class MessageService:
         await self.db.commit()
         return PersistMessageResult(message=message, created=True)
 
-    async def find_latest_image(self, chat_jid: str) -> IncomingMessage:
+    async def find_latest_image(self, chat_jid: str, requester_phone: str | None = None) -> IncomingMessage:
         min_time = datetime.now(UTC) - timedelta(minutes=self.settings.image_command_ttl_minutes)
         result = await self.db.execute(
             select(IncomingMessage)
@@ -83,6 +83,16 @@ class MessageService:
             .limit(1)
         )
         message = result.scalar_one_or_none()
+        if not message and requester_phone:
+            result = await self.db.execute(
+                select(IncomingMessage)
+                .where(IncomingMessage.requester_phone == requester_phone)
+                .where(IncomingMessage.message_type == "image")
+                .where(IncomingMessage.received_at >= min_time)
+                .order_by(IncomingMessage.id.desc())
+                .limit(1)
+            )
+            message = result.scalar_one_or_none()
         if not message:
             raise HTTPException(status_code=404, detail="No recent image found in this chat.")
         return message

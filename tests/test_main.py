@@ -50,3 +50,24 @@ def test_is_authorized_self_chat_rejects_foreign_message() -> None:
     )
     message = build_message(chat_jid="5511999999999@s.whatsapp.net", requester_phone="5511999999999")
     assert is_authorized_self_chat(settings, message) is False
+
+
+def test_is_authorized_self_chat_accepts_owner_lid_message() -> None:
+    settings = Settings.model_construct(
+        evolution_base_url="https://example.com",
+        evolution_api_key="test",
+        evolution_instance="meu-whatsapp",
+        evolution_owner_phone="5519988343888",
+        evolution_owner_lid="121036657934449@lid",
+        openrouter_api_key="test",
+        tmdb_api_token="test",
+        omdb_api_key="test",
+        trakt_client_id="test",
+        trakt_client_secret="test",
+    )
+    message = build_message(
+        chat_jid="121036657934449@lid",
+        requester_phone="121036657934449",
+        sender_phone="121036657934449",
+    )
+    assert is_authorized_self_chat(settings, message) is True

@@ -17,6 +17,7 @@ def build_settings() -> Settings:
         evolution_api_key="test",
         evolution_instance="meu-whatsapp",
         evolution_owner_phone="5519988343888",
+        evolution_owner_lid="121036657934449@lid",
         openrouter_api_key="test",
         tmdb_api_token="test",
         omdb_api_key="test",
@@ -26,14 +27,22 @@ def build_settings() -> Settings:
     )
 
 
-def build_payload(*, provider_id: str = "1", from_me: bool = True, phone: str = "5519988343888", text: str = "x-info") -> dict:
+def build_payload(
+    *,
+    provider_id: str = "1",
+    from_me: bool = True,
+    phone: str = "5519988343888",
+    text: str = "x-info",
+    remote_jid: str | None = None,
+    participant: str | None = None,
+) -> dict:
     return {
         "event": "MESSAGES_UPSERT",
         "data": {
             "key": {
                 "id": provider_id,
-                "remoteJid": f"{phone}@s.whatsapp.net",
-                "participant": f"{phone}@s.whatsapp.net",
+                "remoteJid": remote_jid or f"{phone}@s.whatsapp.net",
+                "participant": participant or f"{phone}@s.whatsapp.net",
                 "fromMe": from_me,
             },
             "message": {"conversation": text},
@@ -122,3 +131,36 @@ def test_webhook_enqueues_x_info_for_owner_self_chat(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "accepted", "command": "x-info"}
     assert redis.jobs == [("process_x_info", ("5519988343888@s.whatsapp.net", "5519988343888"))]
+
+
+def test_webhook_enqueues_x_info_for_owner_lid_chat(monkeypatch) -> None:
+    app.dependency_overrides[settings_dep] = lambda: build_settings()
+    app.dependency_overrides[db_dep] = fake_db_dep
+    redis = FakeRedis()
+
+    async def fake_redis_pool() -> FakeRedis:
+        return redis
+
+    async def fake_persist(self, normalized: NormalizedMessage) -> PersistMessageResult:
+        assert normalized.requester_phone == "5519988343888"
+        assert normalized.sender_phone == "5519988343888"
+        return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
+
+    monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
+    monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/evolution/messages",
+            json=build_payload(
+                provider_id="lid-1",
+                text="x-info",
+                remote_jid="121036657934449@lid",
+                participant="121036657934449@lid",
+            ),
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "command": "x-info"}
+    assert redis.jobs == [("process_x_info", ("121036657934449@lid", "5519988343888"))]

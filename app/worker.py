@@ -21,7 +21,7 @@ async def process_x_info(_: dict, chat_jid: str, requester_phone: str) -> None:
     async with SessionLocal() as db:
         service = MessageService(settings, db)
         try:
-            message = await service.find_latest_image(chat_jid)
+            message = await service.find_latest_image(chat_jid, requester_phone)
             if not message.media_url:
                 await pipeline.evolution.send_text(
                     chat_jid,

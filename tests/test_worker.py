@@ -27,7 +27,7 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
         def __init__(self, settings, db) -> None:
             pass
 
-        async def find_latest_image(self, chat_jid: str):
+        async def find_latest_image(self, chat_jid: str, requester_phone: str | None = None):
             return SimpleNamespace(media_url="https://example.com/poster.jpg", chat_jid=chat_jid, requester_phone="5511")
 
         async def save_identified_media(self, message, enriched) -> None:

@@ -26,6 +26,7 @@ class Settings(BaseSettings):
     evolution_api_key: str
     evolution_instance: str
     evolution_owner_phone: str
+    evolution_owner_lid: str | None = None
     evolution_webhook_secret: str | None = None
     self_chat_only_mode: bool = True
 

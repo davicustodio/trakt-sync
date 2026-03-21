@@ -139,36 +139,36 @@ class OpenRouterClient:
                     return None
             self._ocr_engine = RapidOCR()
 
-        if self._ocr_backend == "rapidocr":
-            result = self._ocr_engine(image_bytes)
-            entries = [
-                {
-                    "text": text.strip(),
-                    "bbox": box.tolist() if hasattr(box, "tolist") else box,
-                    "score": score,
-                }
-                for text, box, score in zip(
-                    getattr(result, "txts", ()),
-                    getattr(result, "boxes", ()),
-                    getattr(result, "scores", ()),
-                )
-                if text and text.strip()
-            ]
-        else:
-            suffix = ".jpg"
-            with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
-                handle.write(image_bytes)
-                temp_path = handle.name
-            try:
+        suffix = ".jpg"
+        with tempfile.NamedTemporaryFile(suffix=suffix, delete=False) as handle:
+            handle.write(image_bytes)
+            temp_path = handle.name
+        try:
+            if self._ocr_backend == "rapidocr":
+                result = self._ocr_engine(temp_path)
+                entries = [
+                    {
+                        "text": text.strip(),
+                        "bbox": box.tolist() if hasattr(box, "tolist") else box,
+                        "score": score,
+                    }
+                    for text, box, score in zip(
+                        getattr(result, "txts", ()),
+                        getattr(result, "boxes", ()),
+                        getattr(result, "scores", ()),
+                    )
+                    if text and text.strip()
+                ]
+            else:
                 result, _ = self._ocr_engine(temp_path)
-            finally:
-                with contextlib.suppress(OSError):
-                    os.unlink(temp_path)
-            entries = [
-                {"text": entry[1].strip(), "bbox": entry[0], "score": entry[2] if len(entry) >= 3 else 0.0}
-                for entry in (result or [])
-                if len(entry) >= 2 and entry[1].strip()
-            ]
+                entries = [
+                    {"text": entry[1].strip(), "bbox": entry[0], "score": entry[2] if len(entry) >= 3 else 0.0}
+                    for entry in (result or [])
+                    if len(entry) >= 2 and entry[1].strip()
+                ]
+        finally:
+            with contextlib.suppress(OSError):
+                os.unlink(temp_path)
         lines = [entry["text"] for entry in entries]
         if not lines:
             return None

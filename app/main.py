@@ -24,6 +24,7 @@ from app.utils import decode_state, encode_state, extract_message_from_evolution
 from app.worker import process_x_info, process_x_save
 
 templates = Jinja2Templates(directory="app/templates")
+WORKER_HEALTH_MAX_AGE_SECONDS = 90
 
 
 @asynccontextmanager
@@ -66,6 +67,25 @@ async def ready() -> dict[str, str]:
     return {"status": "ready"}
 
 
+def is_worker_health_fresh(worker_health: bytes | str | None, now: datetime | None = None) -> bool:
+    if not worker_health:
+        return False
+    if isinstance(worker_health, bytes):
+        worker_health = worker_health.decode("utf-8", errors="ignore")
+    timestamp = worker_health.split(" j_complete=", 1)[0].strip()
+    current = now or datetime.now()
+    for fmt in ("%b-%d %H:%M:%S",):
+        try:
+            parsed = datetime.strptime(timestamp, fmt).replace(year=current.year)
+        except ValueError:
+            continue
+        # ARQ omits the year; reject obviously future timestamps around year boundaries.
+        if parsed > current:
+            parsed = parsed.replace(year=current.year - 1)
+        return (current - parsed).total_seconds() <= WORKER_HEALTH_MAX_AGE_SECONDS
+    return False
+
+
 async def dispatch_command(
     command: str,
     chat_jid: str,
@@ -80,7 +100,7 @@ async def dispatch_command(
     try:
         if redis is not None:
             worker_health = await redis.get(f"{default_queue_name}{health_check_key_suffix}")
-            if worker_health:
+            if is_worker_health_fresh(worker_health):
                 if command == "x-info":
                     await redis.enqueue_job("process_x_info", chat_jid, requester_phone)
                 elif command == "x-save":

@@ -1,9 +1,11 @@
-from app.config import Settings
-from app.auth import is_authorized_self_chat
-from app.main import dispatch_command
-from app.schemas import NormalizedMessage
+from datetime import datetime
 
 import pytest
+
+from app.config import Settings
+from app.auth import is_authorized_self_chat
+from app.main import dispatch_command, is_worker_health_fresh
+from app.schemas import NormalizedMessage
 
 
 def build_message(**overrides: object) -> NormalizedMessage:
@@ -76,6 +78,26 @@ def test_is_authorized_self_chat_accepts_owner_lid_message() -> None:
     assert is_authorized_self_chat(settings, message) is True
 
 
+def test_is_worker_health_fresh_accepts_recent_timestamp() -> None:
+    assert (
+        is_worker_health_fresh(
+            "Mar-21 12:00:30 j_complete=1 j_failed=0 j_retried=0 j_ongoing=0 queued=0",
+            now=datetime(2026, 3, 21, 12, 1, 0),
+        )
+        is True
+    )
+
+
+def test_is_worker_health_fresh_rejects_stale_timestamp() -> None:
+    assert (
+        is_worker_health_fresh(
+            "Mar-21 12:00:00 j_complete=1 j_failed=0 j_retried=0 j_ongoing=0 queued=0",
+            now=datetime(2026, 3, 21, 12, 3, 0),
+        )
+        is False
+    )
+
+
 class FakeRedis:
     def __init__(self, worker_health: bytes | None) -> None:
         self.worker_health = worker_health
@@ -134,9 +156,44 @@ async def test_dispatch_command_enqueues_when_worker_health_is_present(monkeypat
 
     monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
     monkeypatch.setattr("app.main.asyncio.create_task", fake_create_task)
+    monkeypatch.setattr(
+        "app.main.is_worker_health_fresh",
+        lambda worker_health: True,
+    )
 
     await dispatch_command("x-info", "5511999999999@s.whatsapp.net", "5511999999999")
 
     assert redis.jobs == [("process_x_info", ("5511999999999@s.whatsapp.net", "5511999999999"))]
     assert redis.closed is True
     assert scheduled == []
+
+
+@pytest.mark.asyncio
+async def test_dispatch_command_falls_back_when_worker_health_is_stale(monkeypatch) -> None:
+    redis = FakeRedis(worker_health=b"Mar-21 12:00:00 j_complete=1")
+    scheduled: list[tuple[str, tuple[object, ...]]] = []
+
+    async def fake_process_x_info(ctx: dict, chat_jid: str, requester_phone: str) -> None:
+        return None
+
+    def fake_create_task(coro) -> str:
+        scheduled.append((coro.cr_code.co_name, coro.cr_frame.f_locals["chat_jid"], coro.cr_frame.f_locals["requester_phone"]))
+        coro.close()
+        return "task"
+
+    async def fake_redis_pool() -> FakeRedis:
+        return redis
+
+    monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
+    monkeypatch.setattr("app.main.process_x_info", fake_process_x_info)
+    monkeypatch.setattr("app.main.asyncio.create_task", fake_create_task)
+    monkeypatch.setattr(
+        "app.main.is_worker_health_fresh",
+        lambda worker_health: False,
+    )
+
+    await dispatch_command("x-info", "5511999999999@s.whatsapp.net", "5511999999999")
+
+    assert redis.jobs == []
+    assert redis.closed is True
+    assert scheduled == [("fake_process_x_info", "5511999999999@s.whatsapp.net", "5511999999999")]

@@ -54,7 +54,7 @@ class FakeRedis:
     def __init__(self) -> None:
         self.jobs: list[tuple[str, tuple[str, ...]]] = []
         self.closed = False
-        self.worker_health: bytes | None = b"healthy"
+        self.worker_health: bytes | None = b"Mar-21 12:00:30 j_complete=1 j_failed=0 j_retried=0 j_ongoing=0 queued=0"
 
     async def get(self, key: str) -> bytes | None:
         return self.worker_health
@@ -127,6 +127,7 @@ def test_webhook_enqueues_x_info_for_owner_self_chat(monkeypatch) -> None:
 
     monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+    monkeypatch.setattr("app.main.is_worker_health_fresh", lambda worker_health: True)
 
     with TestClient(app) as client:
         response = client.post("/webhooks/evolution/messages", json=build_payload(provider_id="ok-1"))
@@ -152,6 +153,7 @@ def test_webhook_enqueues_x_info_for_owner_lid_chat(monkeypatch) -> None:
 
     monkeypatch.setattr("app.main.get_redis_pool", fake_redis_pool)
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+    monkeypatch.setattr("app.main.is_worker_health_fresh", lambda worker_health: True)
 
     with TestClient(app) as client:
         response = client.post(

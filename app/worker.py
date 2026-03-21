@@ -75,3 +75,4 @@ class WorkerSettings:
     ]
     redis_settings = redis_settings()
     on_startup = startup
+    health_check_interval = 30

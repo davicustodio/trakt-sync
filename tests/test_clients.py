@@ -214,6 +214,38 @@ async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
+async def test_identify_title_uses_llm_to_normalize_collapsed_ocr_title(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+
+    monkeypatch.setattr(
+        client,
+        "_identify_title_from_ocr",
+        lambda image_bytes: VisionCandidate(
+            detected_title="Inlandempire",
+            media_type="unknown",
+            confidence=0.9,
+            visible_text=["INLANDEMPIRE"],
+        ),
+    )
+
+    captured_prompts: list[str] = []
+
+    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool) -> tuple[VisionCandidate, list[str]]:
+        captured_prompts.append(prompt)
+        return (
+            VisionCandidate(detected_title="Inland Empire", media_type="movie", year=2006, confidence=0.96),
+            ["google/gemini-2.5-flash: Inland Empire"],
+        )
+
+    monkeypatch.setattr(client, "_query_candidate", fake_query_candidate)
+
+    candidate = await client.identify_title(b"fake-image")
+
+    assert candidate.detected_title == "Inland Empire"
+    assert "restore the natural title spacing" in captured_prompts[0]
+
+
+@pytest.mark.asyncio
 async def test_query_candidate_uses_paid_fallback_after_free_models(monkeypatch) -> None:
     requested_models: list[str] = []
 

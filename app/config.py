@@ -25,7 +25,9 @@ class Settings(BaseSettings):
     evolution_base_url: str
     evolution_api_key: str
     evolution_instance: str
+    evolution_owner_phone: str
     evolution_webhook_secret: str | None = None
+    self_chat_only_mode: bool = True
 
     openrouter_api_key: str
     openrouter_site_url: str | None = None

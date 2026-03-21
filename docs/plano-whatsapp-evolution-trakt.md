@@ -23,13 +23,34 @@ Criar um servico no Dokploy2 que use a instancia ja existente do Evolution API p
 - streaming BR via TMDb watch providers
 - watchlist Trakt
 - logs, idempotencia, retries, validacao e testes
+- modo estrito inicial: somente mensagens enviadas pelo dono da instancia para o proprio WhatsApp disparam automacoes
 
 ### Fora de V1
 
 - scraping de IMDb, Rotten Tomatoes ou Letterboxd
-- autenticacao multiusuario por contato
+- execucao de comandos para numeros externos no modo inicial
 - painel administrativo completo
 - OCR dedicado separado do modelo multimodal
+
+## 2.1 Regra critica de acionamento
+
+No estado atual do produto, `x-info` e `x-save` **so podem ser executados** quando:
+
+- a mensagem foi enviada pelo proprio dono da instancia Evolution
+- a mensagem foi enviada para o proprio chat do dono
+- o numero remetente coincide com o numero dono configurado em `EVOLUTION_OWNER_PHONE`
+
+Se a mensagem vier de outro numero de WhatsApp, o servico deve ignorar totalmente o evento e nao persistir nem disparar automacao.
+
+### Preparacao para futuro multiusuario
+
+A base continua preparada para evoluir para multiusuario, porque:
+
+- existe uma entidade de telefone/perfil
+- a vinculacao Trakt ja e modelada por telefone
+- o comportamento estrito fica controlado por `SELF_CHAT_ONLY_MODE=true`
+
+Quando voce quiser abrir o servico para terceiros, basta desligar esse modo e endurecer a camada de autorizacao por numero.
 
 ## 3. Stack recomendada
 
@@ -132,14 +153,16 @@ Detalhe completo em [openrouter-free-vision-fallback.md](/Users/davi/development
 ### 6.1 Imagem recebida
 
 1. Evolution envia `MESSAGES_UPSERT`.
-2. O servico identifica que a mensagem contem imagem.
-3. O servico persiste a mensagem e marca como `pending_info`.
-4. O webhook responde rapido com `200`.
+2. O servico valida se a mensagem veio do dono para o proprio chat.
+3. So depois disso ele identifica se a mensagem contem imagem.
+4. O servico persiste a mensagem e marca como `pending_info`.
+5. O webhook responde rapido com `200`.
 
 ### 6.2 `x-info`
 
 1. Evolution envia novo `MESSAGES_UPSERT` com texto `x-info`.
-2. O servico busca a ultima imagem valida do mesmo chat.
+2. O servico valida novamente a regra de self-chat.
+3. O servico busca a ultima imagem valida do mesmo chat.
 3. Se nao houver imagem recente, responde pedindo que a imagem seja reenviada.
 4. Se houver:
    - cria um job
@@ -154,7 +177,8 @@ Detalhe completo em [openrouter-free-vision-fallback.md](/Users/davi/development
 ### 6.3 `x-save`
 
 1. Evolution envia `MESSAGES_UPSERT` com texto `x-save`.
-2. O servico procura o ultimo titulo confirmado no mesmo chat.
+2. O servico valida novamente a regra de self-chat.
+3. O servico procura o ultimo titulo confirmado no mesmo chat.
 3. Se nao existir, responde pedindo `x-info`.
 4. Se existir:
    - valida token do Trakt

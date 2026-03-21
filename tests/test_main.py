@@ -1,0 +1,52 @@
+from app.config import Settings
+from app.auth import is_authorized_self_chat
+from app.schemas import NormalizedMessage
+
+
+def build_message(**overrides: object) -> NormalizedMessage:
+    payload = {
+        "event_name": "MESSAGES_UPSERT",
+        "provider_message_id": "1",
+        "chat_jid": "5519988343888@s.whatsapp.net",
+        "requester_phone": "5519988343888",
+        "sender_phone": "5519988343888",
+        "is_from_me": True,
+        "message_type": "text",
+        "text_body": "x-info",
+        "media_url": None,
+        "media_mime_type": None,
+        "raw_payload": {},
+    }
+    payload.update(overrides)
+    return NormalizedMessage(**payload)
+
+
+def test_is_authorized_self_chat_accepts_owner_self_message() -> None:
+    settings = Settings.model_construct(
+        evolution_base_url="https://example.com",
+        evolution_api_key="test",
+        evolution_instance="meu-whatsapp",
+        evolution_owner_phone="5519988343888",
+        openrouter_api_key="test",
+        tmdb_api_token="test",
+        omdb_api_key="test",
+        trakt_client_id="test",
+        trakt_client_secret="test",
+    )
+    assert is_authorized_self_chat(settings, build_message()) is True
+
+
+def test_is_authorized_self_chat_rejects_foreign_message() -> None:
+    settings = Settings.model_construct(
+        evolution_base_url="https://example.com",
+        evolution_api_key="test",
+        evolution_instance="meu-whatsapp",
+        evolution_owner_phone="5519988343888",
+        openrouter_api_key="test",
+        tmdb_api_token="test",
+        omdb_api_key="test",
+        trakt_client_id="test",
+        trakt_client_secret="test",
+    )
+    message = build_message(chat_jid="5511999999999@s.whatsapp.net", requester_phone="5511999999999")
+    assert is_authorized_self_chat(settings, message) is False

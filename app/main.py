@@ -11,6 +11,7 @@ from fastapi.templating import Jinja2Templates
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.auth import is_authorized_self_chat
 from app.clients import TraktClient
 from app.config import Settings, get_settings
 from app.db import SessionLocal, get_db_session, init_db
@@ -93,6 +94,10 @@ async def evolution_webhook(
         media_mime_type=extracted.media_mime_type,
         raw_payload=payload,
     )
+
+    if settings.self_chat_only_mode and not is_authorized_self_chat(settings, normalized):
+        return JSONResponse({"status": "ignored", "reason": "self-chat-only"})
+
     service = MessageService(settings, db)
     await service.persist_message(normalized)
 

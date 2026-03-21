@@ -63,6 +63,8 @@ Phase 6
 | Deploy under `https://joaocat.duckdns.org/trakt-sync` instead of a new subdomain | The root host already resolves, avoiding DNS setup blocking the rollout |
 | Ignore duplicate provider message IDs before command dispatch | This is the simplest way to preserve webhook idempotency for retries |
 | Return ambiguity options instead of auto-selecting close TMDb matches | Better to ask for a clearer image than save or reply with a false positive |
+| Unwrap `viewOnce`/`ephemeral` payloads before media extraction | Pasted screenshots from WhatsApp clients may not expose `imageMessage` at the top level |
+| Only enqueue ARQ jobs when the worker health key is present | Prevents `x-info` from disappearing into Redis when only the API is running |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |

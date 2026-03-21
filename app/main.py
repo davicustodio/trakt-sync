@@ -5,6 +5,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from typing import Annotated
 
+from arq.constants import default_queue_name, health_check_key_suffix
 from fastapi import Depends, FastAPI, Form, Header, HTTPException, Request
 from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.templating import Jinja2Templates
@@ -65,6 +66,36 @@ async def ready() -> dict[str, str]:
     return {"status": "ready"}
 
 
+async def dispatch_command(
+    command: str,
+    chat_jid: str,
+    requester_phone: str,
+) -> None:
+    redis = None
+    try:
+        redis = await get_redis_pool()
+    except Exception:
+        redis = None
+
+    try:
+        if redis is not None:
+            worker_health = await redis.get(f"{default_queue_name}{health_check_key_suffix}")
+            if worker_health:
+                if command == "x-info":
+                    await redis.enqueue_job("process_x_info", chat_jid, requester_phone)
+                elif command == "x-save":
+                    await redis.enqueue_job("process_x_save", chat_jid, requester_phone)
+                return
+
+        if command == "x-info":
+            asyncio.create_task(process_x_info({}, chat_jid, requester_phone))
+        elif command == "x-save":
+            asyncio.create_task(process_x_save({}, chat_jid, requester_phone))
+    finally:
+        if redis is not None:
+            await redis.close(close_connection_pool=True)
+
+
 @app.post("/webhooks/evolution/messages")
 async def evolution_webhook(
     request: Request,
@@ -108,25 +139,8 @@ async def evolution_webhook(
         return JSONResponse({"status": "ignored", "reason": "duplicate-event"})
 
     command = (normalized.text_body or "").strip().lower()
-    try:
-        redis = await get_redis_pool()
-    except Exception:
-        redis = None
-
-    try:
-        if command == "x-info":
-            if redis is not None:
-                await redis.enqueue_job("process_x_info", normalized.chat_jid, normalized.requester_phone)
-            else:
-                asyncio.create_task(process_x_info({}, normalized.chat_jid, normalized.requester_phone))
-        elif command == "x-save":
-            if redis is not None:
-                await redis.enqueue_job("process_x_save", normalized.chat_jid, normalized.requester_phone)
-            else:
-                asyncio.create_task(process_x_save({}, normalized.chat_jid, normalized.requester_phone))
-    finally:
-        if redis is not None:
-            await redis.close(close_connection_pool=True)
+    if command in {"x-info", "x-save"}:
+        await dispatch_command(command, normalized.chat_jid, normalized.requester_phone)
 
     return JSONResponse({"status": "accepted", "command": command or None})
 

@@ -10,6 +10,12 @@ from typing import Any
 
 
 PHONE_RE = re.compile(r"(\d+)")
+MESSAGE_WRAPPER_KEYS = {
+    "ephemeralMessage",
+    "viewOnceMessage",
+    "viewOnceMessageV2",
+    "viewOnceMessageV2Extension",
+}
 
 
 def normalize_phone(value: str | None) -> str:
@@ -41,6 +47,19 @@ def first_not_empty(*values: Any) -> Any:
     return None
 
 
+def unwrap_message_content(message: dict[str, Any]) -> dict[str, Any]:
+    current = message
+    while isinstance(current, dict) and len(current) == 1:
+        wrapper_key = next(iter(current.keys()))
+        if wrapper_key not in MESSAGE_WRAPPER_KEYS:
+            break
+        wrapped = (current.get(wrapper_key) or {}).get("message")
+        if not isinstance(wrapped, dict) or not wrapped:
+            break
+        current = wrapped
+    return current
+
+
 @dataclass(slots=True)
 class ExtractedMessage:
     provider_message_id: str
@@ -61,7 +80,7 @@ def extract_message_from_evolution(payload: dict[str, Any]) -> ExtractedMessage 
 
     data = payload.get("data") or {}
     key = data.get("key") or {}
-    message = data.get("message") or {}
+    message = unwrap_message_content(data.get("message") or {})
     provider_message_id = first_not_empty(key.get("id"), data.get("id"))
     if not provider_message_id:
         return None

@@ -107,6 +107,9 @@
   - Simplified `x-save` to reuse the already confirmed TMDb/IMDb IDs instead of re-searching the title.
   - Installed the local project dependencies and expanded the test suite for webhook, pipeline, and worker flows.
   - Published commit `9d7821c` and validated the Dokploy deployment plus remote webhook behavior.
+  - Fixed webhook parsing for pasted/mobile screenshot images wrapped as `viewOnce`/`ephemeral` messages.
+  - Added command dispatch fallback so `x-info` and `x-save` still run when Redis is up but no ARQ worker health key is present.
+  - Expanded tests to cover wrapped image payloads and the worker-health fallback path.
 - Files created/modified:
   - `app/exceptions.py` (created)
   - `app/clients.py` (updated)
@@ -120,6 +123,10 @@
   - `task_plan.md` (updated)
   - `findings.md` (updated)
   - `progress.md` (updated)
+  - `app/utils.py` (updated)
+  - `tests/test_utils.py` (updated)
+  - `tests/test_main.py` (updated)
+  - `tests/test_webhook.py` (updated)
 
 ## Test Results
 | Test | Input | Expected | Actual | Status |
@@ -128,3 +135,4 @@
 | Production health | `GET /trakt-sync/health` | 200 with `{\"status\":\"ok\"}` | Confirmed after hardening deploy | pass |
 | Production duplicate retry | Two identical webhook posts | First accepted, second ignored as duplicate | Confirmed | pass |
 | Production external block | Foreign-number webhook post | Ignore with `self-chat-only` reason | Confirmed | pass |
+| Full unit suite after screenshot fix | `pytest -q` | All tests green | 18 passed | pass |

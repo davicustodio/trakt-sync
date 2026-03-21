@@ -5,9 +5,11 @@ FastAPI service for a WhatsApp media assistant built around Evolution API, OpenR
 ## Features
 
 - Receives Evolution webhook events for image and text messages.
+- Unwraps WhatsApp `viewOnce` and `ephemeral` image payloads, which covers pasted screenshots/prints from mobile clients.
 - Restricts `x-info` and `x-save` to owner self-chat messages in V1.
 - Supports `x-info` to identify a movie or series from the latest image in the chat.
 - Ignores duplicate webhook retries before re-enqueueing work.
+- Falls back to inline command execution when Redis is reachable but no ARQ worker is healthy.
 - Returns 2-3 likely titles instead of forcing a false positive when TMDb is ambiguous.
 - Uses a deterministic free-model OpenRouter vision fallback chain.
 - Enriches the title with TMDb, OMDb, and Brazil streaming availability.

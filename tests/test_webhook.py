@@ -54,6 +54,10 @@ class FakeRedis:
     def __init__(self) -> None:
         self.jobs: list[tuple[str, tuple[str, ...]]] = []
         self.closed = False
+        self.worker_health: bytes | None = b"healthy"
+
+    async def get(self, key: str) -> bytes | None:
+        return self.worker_health
 
     async def enqueue_job(self, name: str, *args: str) -> None:
         self.jobs.append((name, args))

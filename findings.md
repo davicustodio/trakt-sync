@@ -27,6 +27,8 @@
 - The current V1 must reject every message that is not an owner self-chat event before persistence or queue dispatch.
 - Webhook idempotency matters because Evolution can resend the same provider message ID; duplicate command events must not enqueue work twice.
 - The user prefers ambiguity to be surfaced as 2-3 likely options rather than forcing a weak title match.
+- WhatsApp screenshots pasted from mobile clients can arrive wrapped in `viewOnceMessage*` or `ephemeralMessage`; the webhook parser must unwrap those envelopes before looking for `imageMessage`.
+- Redis availability alone is not enough to guarantee command execution; when the ARQ health key is absent, the API should execute `x-info`/`x-save` inline instead of queueing work that no worker will consume.
 
 ## Technical Decisions
 | Decision | Rationale |

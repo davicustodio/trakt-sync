@@ -174,7 +174,9 @@ def test_telegram_webhook_handles_trakt_connect_inline(monkeypatch) -> None:
     assert response.status_code == 200
     assert response.json() == {"status": "accepted", "command": "/trakt-connect"}
     assert sent
-    assert sent[0].startswith("Abra este link para conectar sua conta Trakt:\nhttps://trakt.tv/oauth/authorize?")
+    assert sent == [
+        "Abra este link para conectar sua conta Trakt:\nhttp://localhost:8000/admin/trakt/connect/telegram_321"
+    ]
 
 
 def test_trakt_callback_preserves_telegram_requester_key(monkeypatch) -> None:

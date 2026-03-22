@@ -159,11 +159,9 @@ async def _handle_telegram_utility_command(
         return {"status": "accepted", "command": command}
 
     if command == "/trakt-connect":
-        state = encode_state(
-            {"phone_number": normalized.requester_phone, "generated_at": datetime.now(UTC).isoformat()},
-            settings.trakt_client_secret,
-        )
-        url = TraktClient(settings).build_authorize_url(state)
+        url = f"{settings.app_base_url.rstrip('/')}/admin/trakt/connect/{normalized.requester_phone}"
+        if settings.admin_shared_secret:
+            url = f"{url}?token={settings.admin_shared_secret}"
         await telegram.send_text(normalized.chat_jid, f"Abra este link para conectar sua conta Trakt:\n{url}")
         return {"status": "accepted", "command": command}
 

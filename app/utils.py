@@ -16,6 +16,7 @@ MESSAGE_WRAPPER_KEYS = {
     "viewOnceMessageV2",
     "viewOnceMessageV2Extension",
 }
+TELEGRAM_USER_KEY_PREFIX = "telegram_"
 
 
 def normalize_phone(value: str | None) -> str:
@@ -27,6 +28,21 @@ def normalize_phone(value: str | None) -> str:
 
 def normalize_chat_jid(value: str | None) -> str:
     return value or "unknown@g.us"
+
+
+def build_telegram_user_key(user_id: str | int | None) -> str:
+    if user_id in (None, ""):
+        return "telegram_unknown"
+    return f"{TELEGRAM_USER_KEY_PREFIX}{user_id}"
+
+
+def canonical_command(text: str | None) -> str | None:
+    if not text:
+        return None
+    command = " ".join(str(text).strip().split()).lower()
+    if not command:
+        return None
+    return command
 
 
 def parse_json_response(value: str) -> dict[str, Any]:
@@ -62,14 +78,20 @@ def unwrap_message_content(message: dict[str, Any]) -> dict[str, Any]:
 
 @dataclass(slots=True)
 class ExtractedMessage:
+    channel: str
     provider_message_id: str
     chat_jid: str
     requester_phone: str
     sender_phone: str
+    provider_update_id: str | None
+    provider_chat_id: str | None
+    provider_user_id: str | None
+    chat_message_id: str | None
     is_from_me: bool
     message_type: str
     text_body: str | None
     media_url: str | None
+    media_file_id: str | None
     media_mime_type: str | None
 
 
@@ -115,14 +137,61 @@ def extract_message_from_evolution(payload: dict[str, Any]) -> ExtractedMessage 
         mime_type = None
 
     return ExtractedMessage(
+        channel="whatsapp",
         provider_message_id=str(provider_message_id),
         chat_jid=chat_jid,
         requester_phone=requester_phone,
         sender_phone=sender_phone,
+        provider_update_id=str(payload.get("id")) if payload.get("id") else None,
+        provider_chat_id=chat_jid,
+        provider_user_id=sender_phone,
+        chat_message_id=str(provider_message_id),
         is_from_me=is_from_me,
         message_type=message_type,
         text_body=text_body,
         media_url=media_url,
+        media_file_id=None,
+        media_mime_type=mime_type,
+    )
+
+
+def extract_message_from_telegram(payload: dict[str, Any]) -> ExtractedMessage | None:
+    message = payload.get("message")
+    if not isinstance(message, dict):
+        return None
+
+    chat = message.get("chat") or {}
+    from_user = message.get("from") or {}
+    chat_id = chat.get("id")
+    message_id = message.get("message_id")
+    if chat_id in (None, "") or message_id in (None, ""):
+        return None
+
+    text = first_not_empty(message.get("text"), message.get("caption"))
+    photo_entries = message.get("photo") or []
+    photo = photo_entries[-1] if isinstance(photo_entries, list) and photo_entries else None
+    message_type = "image" if isinstance(photo, dict) else "text"
+    media_file_id = photo.get("file_id") if isinstance(photo, dict) else None
+
+    requester_user_id = str(from_user.get("id") or chat_id)
+    user_key = build_telegram_user_key(requester_user_id)
+    mime_type = "image/jpeg" if media_file_id else None
+
+    return ExtractedMessage(
+        channel="telegram",
+        provider_message_id=str(message_id),
+        chat_jid=str(chat_id),
+        requester_phone=user_key,
+        sender_phone=user_key,
+        provider_update_id=str(payload.get("update_id")) if payload.get("update_id") is not None else None,
+        provider_chat_id=str(chat_id),
+        provider_user_id=requester_user_id,
+        chat_message_id=str(message_id),
+        is_from_me=False,
+        message_type=message_type,
+        text_body=str(text) if text is not None else None,
+        media_url=media_file_id,
+        media_file_id=media_file_id,
         media_mime_type=mime_type,
     )
 

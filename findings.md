@@ -74,3 +74,24 @@
 - Evolution docs confirm the event names required for the webhook design.
 - OpenRouter official docs confirm image input is supported in the standard chat format.
 - The authenticated OpenRouter model list confirms the current free vision-capable set.
+
+## Telegram Reformulation Findings - 2026-03-21
+- The existing code already isolates most of the business logic from the webhook entrypoint, which makes a messaging-provider refactor practical.
+- Telegram's official Bot API is HTTP-based and supports both long polling and outgoing webhooks; webhooks and `getUpdates` are mutually exclusive.
+- Telegram `setWebhook` supports a `secret_token` header, which maps well to the existing webhook-secret pattern already used for Evolution.
+- Telegram `sendChatAction` is explicitly intended to indicate work in progress, but the user specifically wants textual stage messages as well, so the plan should include both status text and optional chat actions.
+- Telegram bots cannot start conversations with users; the user must start the bot first, after which the private `chat_id` can be stored and reused.
+- Telegram hosted Bot API can download files up to 20 MB, which is likely enough for screenshots and posters; a local Bot API server is an optimization, not a base requirement.
+- Telegram hosted Bot API is therefore a better first implementation target than MTProto userbots or an extra Telegram gateway service.
+- The user wants the product to stay future-multiuser, so the current phone/JID-centric schema should move toward user/channel abstractions.
+- The user wants provider failures such as missing TMDb matches to degrade gracefully instead of aborting the whole pipeline.
+- The user also wants ambiguity handling to become an interactive clarification session and asked for Instagram as a possible clarification channel; this should be modeled as a secondary adapter so Telegram remains the official path.
+- Dokploy2 inspection in this session showed a `Whatsapp-Telegram` project with an existing Evolution compose and a separate environment where `trakt-sync-fastapi` is currently healthy; this supports a staged Telegram rollout without uninstalling Evolution.
+- Dokploy2 inspection also showed an existing Postgres service in another project, which is relevant because the current stable app still uses SQLite and the Telegram migration should move persistence to Postgres.
+- The user confirmed on 2026-03-21 that the bot should start multiuser from the first release and that each user must connect an independent Trakt account.
+- The user confirmed PostgreSQL should be used after all and provided credentials out-of-band; those secrets must stay out of repository files and go only into Dokploy environment configuration.
+- The user does not yet have a Telegram bot and needs a detailed BotFather setup path documented.
+- The user has only a normal Instagram account, which reinforces the decision not to make Instagram a hard dependency for the first Telegram rollout.
+- For Telegram UX, the best fit is an initial acknowledgement plus edits to a status message for each step, with a separate final success or error message.
+- The requested bot display name is `davi-movies-shows`, the webhook domain is `hooks-movies-shows.duckdns.org`, and the requested username `davicustodio_movies_shows` should be corrected to a BotFather-valid username ending in `bot`.
+- A dedicated Dokploy deploy checklist is useful here because the next risky step is operational sequencing and secret placement, not more architectural design.

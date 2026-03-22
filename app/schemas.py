@@ -7,15 +7,21 @@ from pydantic import BaseModel, Field
 
 
 class NormalizedMessage(BaseModel):
+    channel: str = "whatsapp"
     event_name: str
     provider_message_id: str
     chat_jid: str
     requester_phone: str
     sender_phone: str
+    provider_update_id: str | None = None
+    provider_chat_id: str | None = None
+    provider_user_id: str | None = None
+    chat_message_id: str | None = None
     is_from_me: bool = False
     message_type: str
     text_body: str | None = None
     media_url: str | None = None
+    media_file_id: str | None = None
     media_mime_type: str | None = None
     raw_payload: dict[str, Any]
 

@@ -30,6 +30,15 @@ class Settings(BaseSettings):
     evolution_webhook_secret: str | None = None
     self_chat_only_mode: bool = True
 
+    telegram_bot_name: str | None = None
+    telegram_bot_username: str | None = None
+    telegram_bot_token: str | None = None
+    telegram_webhook_secret: str | None = None
+    telegram_webhook_url: str | None = None
+    telegram_enable_progress_messages: bool = True
+    telegram_enable_chat_actions: bool = True
+    telegram_default_parse_mode: str = "Markdown"
+
     openrouter_api_key: str
     openrouter_site_url: str | None = None
     openrouter_app_name: str = "trakt-sync"

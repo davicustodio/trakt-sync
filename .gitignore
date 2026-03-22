@@ -2,5 +2,7 @@
 .venv/
 __pycache__/
 .pytest_cache/
+.playwright-cli/
 *.egg-info/
 trakt_sync.db
+test_trakt_sync.db

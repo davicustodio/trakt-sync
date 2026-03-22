@@ -4,7 +4,7 @@
 Produce a complete implementation plan for a Dokploy2-hosted service that receives WhatsApp media events from Evolution API, identifies movie/series posters or frames with an OpenRouter vision model, enriches the title with ratings/reviews/streaming availability in Brazil, replies on WhatsApp, and saves to Trakt watchlist on command.
 
 ## Current Phase
-Phase 6
+Phase 7
 
 ## Phases
 ### Phase 1: Requirements & Discovery
@@ -47,6 +47,15 @@ Phase 6
 - [ ] Validate a full real-message image + `x-info` reply loop in production
 - **Status:** in_progress
 
+### Phase 7: Telegram Reformulation Plan
+- [x] Capture the new Telegram-first requirements and operational constraints
+- [x] Validate Telegram Bot API webhook, media, and self-chat constraints from official docs
+- [x] Inspect Dokploy2-accessible environment shape for deployment planning
+- [x] Write the Telegram migration plan in `docs/novo-plano-telegram.md`
+- [x] Refine the plan after user answers the follow-up questions
+- [x] Author a deploy checklist for Dokploy rollout
+- **Status:** in_progress
+
 ## Key Questions
 1. Which webhook/event shapes are available from the Evolution API instance managed inside Dokploy2?
 2. Which metadata sources are most reliable for ratings, reviews, and Brazil streaming availability with acceptable cost?
@@ -67,6 +76,12 @@ Phase 6
 | Return ambiguity options instead of auto-selecting close TMDb matches | Better to ask for a clearer image than save or reply with a false positive |
 | Unwrap `viewOnce`/`ephemeral` payloads before media extraction | Pasted screenshots from WhatsApp clients may not expose `imageMessage` at the top level |
 | Only enqueue ARQ jobs when the worker health key is present | Prevents `x-info` from disappearing into Redis when only the API is running |
+| Keep FastAPI/Python and swap only the messaging edge for Telegram | The business pipeline is already implemented; a channel refactor is lower-risk than a rewrite |
+| Use Telegram Bot API directly instead of installing a Telegram gateway first | Official webhooks and file download APIs are sufficient for the expected workload |
+| Treat Instagram clarification as an optional secondary channel, not as the core path | Telegram must become stable first; Meta onboarding should not block the migration |
+| Start multiuser from day one and link Trakt per user | The user explicitly wants future scale without a second schema migration later |
+| Use one editable Telegram status message plus final result messages | This keeps stage-by-stage visibility without turning the chat into noise |
+| Use Postgres from the first Telegram rollout and reuse the installed Redis | The user wants multiuser Trakt from day one and provided database credentials for environment configuration |
 
 ## Errors Encountered
 | Error | Attempt | Resolution |
@@ -76,6 +91,13 @@ Phase 6
 | Production startup initially failed behind Traefik | 2 | Added `asyncpg`, then switched deployed `DATABASE_URL` to SQLite fallback because the target environment did not expose a guaranteed Postgres host |
 | Production route returned `502 Bad Gateway` after the OCR rollout | 1 | Reworked OCR initialization to lazy-load the engine so startup is no longer coupled to `rapidocr_onnxruntime` import success |
 | Production `x-info` still failed after the SSL fix | 1 | Verified the WhatsApp CDN URL returned encrypted media bytes and switched media retrieval to Evolution's `getBase64FromMediaMessage` endpoint keyed by the provider message ID |
+
+## Supplemental Notes: 2026-03-21 Telegram Reformulation
+- The current codebase is structurally ready for a channel abstraction because message persistence, title identification, enrichment, and Trakt save logic are already separated from the FastAPI route layer.
+- Telegram Bot API official docs confirm webhook delivery, secret-token validation, direct HTTP methods, and `sendChatAction`, so a custom Telegram bridge service is not required for the first rollout.
+- Telegram bots cannot initiate a conversation with a user; the owner must start the bot first so the app can persist the private `chat_id`.
+- Telegram's hosted Bot API allows file downloads up to 20 MB and covers the expected screenshot/poster use case; a local `telegram-bot-api` server is only a later optimization if larger media or special webhook routing is needed.
+- Dokploy2 inspection in this session shows app/project/domain automation is available, but first-class Postgres/Redis creation is not exposed through the current `dokploy2` MCP surface, so database provisioning should be planned separately.
 
 ## Notes
 - Keep web research findings out of this file and store them in findings.md.

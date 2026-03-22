@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from app.clients import EvolutionClient, OpenRouterClient, TMDbClient
+from app.clients import EvolutionClient, OpenRouterClient, TMDbClient, TelegramClient
 from app.config import Settings
 from app.schemas import VisionCandidate
 
@@ -18,6 +18,7 @@ def build_settings() -> Settings:
         evolution_instance="meu-whatsapp",
         evolution_owner_phone="5519988343888",
         evolution_owner_lid="121036657934449@lid",
+        telegram_bot_token="telegram-token",
         openrouter_api_key="test",
         tmdb_api_token="test",
         omdb_api_key="test",
@@ -139,6 +140,93 @@ async def test_fetch_media_bytes_falls_back_to_media_url_with_ssl_bypass(monkeyp
 
     assert payload == b"image-bytes"
     assert calls == [False]
+
+
+@pytest.mark.asyncio
+async def test_telegram_send_text_returns_message_id(monkeypatch) -> None:
+    calls: list[tuple[str, dict[str, object]]] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"result": {"message_id": 44}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.base_url = kwargs.get("base_url")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, object]) -> FakeResponse:
+            calls.append((path, json))
+            return FakeResponse()
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    client = TelegramClient(build_settings())
+    message_id = await client.send_text("321", "teste")
+
+    assert message_id == 44
+    assert calls == [
+        (
+            "/sendMessage",
+            {"chat_id": "321", "text": "teste", "parse_mode": "Markdown"},
+        )
+    ]
+
+
+@pytest.mark.asyncio
+async def test_telegram_fetch_media_bytes_uses_get_file_and_download(monkeypatch) -> None:
+    calls: list[tuple[str, str]] = []
+
+    class FileResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"result": {"file_path": "photos/file_1.jpg"}}
+
+    class DownloadResponse:
+        content = b"telegram-image"
+
+        def raise_for_status(self) -> None:
+            return None
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.base_url = kwargs.get("base_url")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, object]) -> FileResponse:
+            calls.append(("post", path))
+            assert json == {"file_id": "file-123"}
+            return FileResponse()
+
+        async def get(self, url: str) -> DownloadResponse:
+            calls.append(("get", url))
+            return DownloadResponse()
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    client = TelegramClient(build_settings())
+    payload = await client.fetch_media_bytes("file-123")
+
+    assert payload == b"telegram-image"
+    assert calls == [
+        ("post", "/getFile"),
+        ("get", "https://api.telegram.org/file/bottelegram-token/photos/file_1.jpg"),
+    ]
 
 
 def test_identify_title_uses_local_ocr_for_title_cards() -> None:

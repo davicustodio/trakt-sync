@@ -1,9 +1,17 @@
 # trakt-sync
 
-FastAPI service for a WhatsApp media assistant built around Evolution API, OpenRouter vision models, TMDb, OMDb, and Trakt.
+FastAPI service for movie and series identification built around Telegram, OpenRouter vision models, TMDb, OMDb, and Trakt.
 
 ## Features
 
+- Receives Telegram webhook events for private-chat image and text messages.
+- Supports `/start`, `/help`, `/whoami`, `/trakt-connect`, and `/trakt-status`.
+- Supports photo caption `x-info` and photo followed by `x-info`.
+- Sends immediate acknowledgement and per-stage progress updates on Telegram.
+- Supports `x-save` to add the latest identified title to the requester's Trakt watchlist.
+- Keeps Trakt linking per user, ready for multiuser usage.
+- Falls back gracefully when TMDb does not confirm the title, instead of aborting the whole pipeline.
+- Keeps the previous WhatsApp/Evolution path available as legacy compatibility while Telegram becomes the official channel.
 - Receives Evolution webhook events for image and text messages.
 - Unwraps WhatsApp `viewOnce` and `ephemeral` image payloads, which covers pasted screenshots/prints from mobile clients.
 - Restricts `x-info` and `x-save` to owner self-chat messages in V1.
@@ -31,6 +39,12 @@ uvicorn app.main:app --reload
 ```bash
 arq app.worker.WorkerSettings
 ```
+
+## Telegram bot
+
+- Display name: `davi-movies-shows`
+- Recommended username: `davicustodio_movies_shows_bot`
+- Webhook target: `https://hooks-movies-shows.duckdns.org/webhooks/telegram`
 
 ## Environment
 

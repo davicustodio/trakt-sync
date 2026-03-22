@@ -13,14 +13,22 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import canonical_owner_phone, is_authorized_self_chat
-from app.clients import EvolutionClient, TraktClient
+from app.clients import EvolutionClient, TelegramClient, TraktClient
 from app.config import Settings, get_settings
 from app.db import SessionLocal, get_db_session, init_db
 from app.models import PhoneProfile, TraktConnection
 from app.schemas import NormalizedMessage
 from app.services import MessageService, PipelineService
-from app.utils import decode_state, encode_state, extract_message_from_evolution, normalize_phone
-from app.worker import process_x_info, process_x_save
+from app.utils import (
+    build_telegram_user_key,
+    canonical_command,
+    decode_state,
+    encode_state,
+    extract_message_from_evolution,
+    extract_message_from_telegram,
+    normalize_phone,
+)
+from app.worker import process_telegram_x_info, process_telegram_x_save, process_x_info, process_x_save
 
 templates = Jinja2Templates(directory="app/templates")
 poller_task: asyncio.Task | None = None
@@ -98,6 +106,88 @@ async def dispatch_command_inline(
         await process_x_save({}, chat_jid, requester_phone)
 
 
+async def dispatch_telegram_command(
+    command: str,
+    chat_id: str,
+    requester_key: str,
+    background_tasks: BackgroundTasks,
+    trigger_message_id: str | None = None,
+    status_message_id: int | None = None,
+) -> None:
+    if command == "x-info":
+        background_tasks.add_task(process_telegram_x_info, {}, chat_id, requester_key, trigger_message_id, status_message_id)
+    elif command == "x-save":
+        background_tasks.add_task(process_telegram_x_save, {}, chat_id, requester_key, status_message_id)
+
+
+async def _handle_telegram_utility_command(
+    normalized: NormalizedMessage,
+    settings: Settings,
+    db: AsyncSession,
+) -> dict[str, str | None]:
+    telegram = TelegramClient(settings)
+    command = canonical_command(normalized.text_body)
+    service = MessageService(settings, db)
+
+    if command == "/start":
+        profile = await service.upsert_phone_profile(normalized.requester_phone)
+        profile.display_name = normalized.raw_payload.get("message", {}).get("from", {}).get("first_name")
+        await db.commit()
+        await telegram.send_text(
+            normalized.chat_jid,
+            "Bot ativo.\nEnvie uma foto com `x-info` na legenda ou envie a foto e depois `x-info`.\nUse `/trakt-connect` para ligar sua conta Trakt.",
+        )
+        return {"status": "accepted", "command": command}
+
+    if command == "/help":
+        await telegram.send_text(
+            normalized.chat_jid,
+            "/start\n/help\n/whoami\n/trakt-connect\n/trakt-status\nx-info\nx-save",
+        )
+        return {"status": "accepted", "command": command}
+
+    if command == "/whoami":
+        await telegram.send_text(
+            normalized.chat_jid,
+            (
+                f"user_key: `{normalized.requester_phone}`\n"
+                f"user_id: `{normalized.provider_user_id or 'unknown'}`\n"
+                f"chat_id: `{normalized.chat_jid}`"
+            ),
+        )
+        return {"status": "accepted", "command": command}
+
+    if command == "/trakt-connect":
+        state = encode_state(
+            {"phone_number": normalized.requester_phone, "generated_at": datetime.now(UTC).isoformat()},
+            settings.trakt_client_secret,
+        )
+        url = TraktClient(settings).build_authorize_url(state)
+        await telegram.send_text(normalized.chat_jid, f"Abra este link para conectar sua conta Trakt:\n{url}")
+        return {"status": "accepted", "command": command}
+
+    if command == "/trakt-status":
+        result = await db.execute(select(PhoneProfile).where(PhoneProfile.phone_number == normalized.requester_phone))
+        profile = result.scalar_one_or_none()
+        if not profile:
+            await telegram.send_text(normalized.chat_jid, "Nenhum perfil encontrado ainda. Use /start primeiro.")
+            return {"status": "accepted", "command": command}
+        connection_result = await db.execute(
+            select(TraktConnection).where(TraktConnection.phone_profile_id == profile.id)
+        )
+        connection = connection_result.scalar_one_or_none()
+        if not connection or not connection.access_token:
+            await telegram.send_text(normalized.chat_jid, "Sua conta Trakt ainda nao esta conectada. Use /trakt-connect.")
+            return {"status": "accepted", "command": command}
+        await telegram.send_text(
+            normalized.chat_jid,
+            f"Conta Trakt conectada. Usuario: {connection.trakt_username or 'desconhecido'}.",
+        )
+        return {"status": "accepted", "command": command}
+
+    return {"status": "ignored", "reason": "unsupported-command"}
+
+
 async def handle_normalized_message(
     normalized: NormalizedMessage,
     settings: Settings,
@@ -106,9 +196,9 @@ async def handle_normalized_message(
     background_tasks: BackgroundTasks | None = None,
     force_inline_dispatch: bool = False,
 ) -> dict[str, str | None]:
-    if settings.self_chat_only_mode and not is_authorized_self_chat(settings, normalized):
+    if normalized.channel == "whatsapp" and settings.self_chat_only_mode and not is_authorized_self_chat(settings, normalized):
         return {"status": "ignored", "reason": "self-chat-only"}
-    if settings.self_chat_only_mode:
+    if normalized.channel == "whatsapp" and settings.self_chat_only_mode:
         normalized.requester_phone = canonical_owner_phone(settings)
         normalized.sender_phone = canonical_owner_phone(settings)
 
@@ -117,8 +207,35 @@ async def handle_normalized_message(
     if not persisted.created:
         return {"status": "ignored", "reason": "duplicate-event"}
 
-    command = (normalized.text_body or "").strip().lower()
+    command = canonical_command(normalized.text_body)
+    if normalized.channel == "telegram" and command in {"/start", "/help", "/whoami", "/trakt-connect", "/trakt-status"}:
+        return await _handle_telegram_utility_command(normalized, settings, db)
     if command in {"x-info", "x-save"}:
+        if normalized.channel == "telegram":
+            telegram = TelegramClient(settings)
+            total_steps = 6 if command == "x-info" else 5
+            await telegram.send_text(normalized.chat_jid, f"Recebi sua solicitacao. O {command} esta em processamento.")
+            status_message_id = await telegram.send_text(
+                normalized.chat_jid,
+                f"[{command}] Etapa 1/{total_steps}: preparando o processamento.",
+            )
+            if background_tasks is None or force_inline_dispatch:
+                if command == "x-info":
+                    await process_telegram_x_info(
+                        {}, normalized.chat_jid, normalized.requester_phone, normalized.provider_message_id, status_message_id
+                    )
+                else:
+                    await process_telegram_x_save({}, normalized.chat_jid, normalized.requester_phone, status_message_id)
+            else:
+                await dispatch_telegram_command(
+                    command,
+                    normalized.chat_jid,
+                    normalized.requester_phone,
+                    background_tasks,
+                    normalized.provider_message_id,
+                    status_message_id,
+                )
+            return {"status": "accepted", "command": command}
         if force_inline_dispatch or background_tasks is None:
             await dispatch_command_inline(
                 command,
@@ -160,15 +277,21 @@ async def reconcile_recent_owner_messages(settings: Settings) -> None:
         if extracted is None:
             continue
         normalized = NormalizedMessage(
+            channel=extracted.channel,
             event_name=str(payload.get("event") or "MESSAGES_UPSERT"),
             provider_message_id=extracted.provider_message_id,
             chat_jid=extracted.chat_jid,
             requester_phone=extracted.requester_phone,
             sender_phone=extracted.sender_phone,
+            provider_update_id=extracted.provider_update_id,
+            provider_chat_id=extracted.provider_chat_id,
+            provider_user_id=extracted.provider_user_id,
+            chat_message_id=extracted.chat_message_id,
             is_from_me=extracted.is_from_me,
             message_type=extracted.message_type,
             text_body=extracted.text_body,
             media_url=extracted.media_url,
+            media_file_id=extracted.media_file_id,
             media_mime_type=extracted.media_mime_type,
             raw_payload=payload,
         )
@@ -205,19 +328,64 @@ async def evolution_webhook(
         return JSONResponse({"status": "ignored"})
 
     normalized = NormalizedMessage(
+        channel=extracted.channel,
         event_name=str(payload.get("event") or "MESSAGES_UPSERT"),
         provider_message_id=extracted.provider_message_id,
         chat_jid=extracted.chat_jid,
         requester_phone=extracted.requester_phone,
         sender_phone=extracted.sender_phone,
+        provider_update_id=extracted.provider_update_id,
+        provider_chat_id=extracted.provider_chat_id,
+        provider_user_id=extracted.provider_user_id,
+        chat_message_id=extracted.chat_message_id,
         is_from_me=extracted.is_from_me,
         message_type=extracted.message_type,
         text_body=extracted.text_body,
         media_url=extracted.media_url,
+        media_file_id=extracted.media_file_id,
         media_mime_type=extracted.media_mime_type,
         raw_payload=payload,
     )
 
+    return JSONResponse(await handle_normalized_message(normalized, settings, db, background_tasks=background_tasks))
+
+
+@app.post("/webhooks/telegram")
+async def telegram_webhook(
+    request: Request,
+    background_tasks: BackgroundTasks,
+    settings: Annotated[Settings, Depends(settings_dep)],
+    db: Annotated[AsyncSession, Depends(db_dep)],
+) -> JSONResponse:
+    payload = await request.json()
+    if settings.telegram_webhook_secret:
+        provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
+        if provided != settings.telegram_webhook_secret:
+            raise HTTPException(status_code=401, detail="Invalid Telegram webhook secret.")
+
+    extracted = extract_message_from_telegram(payload)
+    if extracted is None:
+        return JSONResponse({"status": "ignored"})
+
+    normalized = NormalizedMessage(
+        channel=extracted.channel,
+        event_name="telegram.message",
+        provider_message_id=extracted.provider_message_id,
+        chat_jid=extracted.chat_jid,
+        requester_phone=extracted.requester_phone,
+        sender_phone=extracted.sender_phone,
+        provider_update_id=extracted.provider_update_id,
+        provider_chat_id=extracted.provider_chat_id,
+        provider_user_id=extracted.provider_user_id,
+        chat_message_id=extracted.chat_message_id,
+        is_from_me=extracted.is_from_me,
+        message_type=extracted.message_type,
+        text_body=extracted.text_body,
+        media_url=extracted.media_url,
+        media_file_id=extracted.media_file_id,
+        media_mime_type=extracted.media_mime_type,
+        raw_payload=payload,
+    )
     return JSONResponse(await handle_normalized_message(normalized, settings, db, background_tasks=background_tasks))
 
 

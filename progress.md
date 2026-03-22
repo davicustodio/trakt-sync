@@ -152,3 +152,31 @@
   - Re-ran the targeted suite after the media retrieval fix and confirmed all tests passed.
   - Confirmed locally that OpenRouter can identify the screenshot when OCR is bypassed, which narrowed the production issue to the OCR runtime path.
   - Added `rapidocr` as the preferred OCR backend, keeping `rapidocr_onnxruntime` only as a compatibility fallback, and revalidated the targeted suite.
+
+## Session: 2026-03-21 - Telegram Reformulation Planning
+
+### Phase 7: Telegram Reformulation Plan
+- **Status:** in_progress
+- Actions taken:
+  - Read the existing WhatsApp/Evolution implementation and identified that the current business logic can be preserved behind a messaging-provider abstraction.
+  - Reviewed the previous WhatsApp plan and reused only the stable architecture parts that remain valid for Telegram.
+  - Validated Telegram Bot API webhook, `secret_token`, `getFile`, `sendMessage`, `sendChatAction`, and private-chat startup constraints from official Telegram docs.
+  - Inspected the current Dokploy2-accessible projects/environments to ground the deployment plan in the available platform surface.
+  - Authored a new migration plan at `docs/novo-plano-telegram.md`, including progress notifications, graceful provider fallbacks, future multiuser support, Dokploy2 usage notes, and a complete testing workflow.
+  - Incorporated the user's follow-up answers: multiuser from day one, Trakt per user, reuse of the existing PostgreSQL service, and a Telegram-first clarification flow without depending on Instagram in the first release.
+  - Expanded the document with a detailed BotFather setup sequence, webhook registration examples, and the selected Telegram progress-message pattern.
+  - Revised the plan again after the user confirmed the concrete bot/domain values, kept the installed Redis, and reverted the persistence choice back to PostgreSQL for the Telegram rollout.
+  - Authored `docs/checklist-deploy-telegram-dokploy.md` to convert the approved plan into an operational Dokploy rollout checklist with env vars, webhook registration, and validation steps.
+- Files created/modified:
+  - `docs/novo-plano-telegram.md` (created)
+  - `docs/checklist-deploy-telegram-dokploy.md` (created)
+  - `task_plan.md` (updated)
+  - `findings.md` (updated)
+  - `progress.md` (updated)
+
+## Test Results
+| Test | Input | Expected | Actual | Status |
+|------|-------|----------|--------|--------|
+| Telegram Bot API docs check | Official docs | Confirm webhook, secret token, file download, and progress-action support | Confirmed | pass |
+| Telegram bot conversation constraint check | Official intro docs | Confirm whether bot can proactively start a chat | Confirmed user must message bot first | pass |
+| Dokploy2 project inspection | MCP project/environment/application reads | Confirm what can be automated in the current Dokploy2 surface | Confirmed app/env/project operations and noted missing first-class DB provisioning | pass |

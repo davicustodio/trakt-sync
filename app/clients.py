@@ -93,6 +93,65 @@ class EvolutionClient:
         return [record for record in records if isinstance(record, dict)]
 
 
+class TelegramClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        if not self.settings.telegram_bot_token:
+            raise RuntimeError("TELEGRAM_BOT_TOKEN is not configured.")
+
+    @property
+    def _base_url(self) -> str:
+        return f"https://api.telegram.org/bot{self.settings.telegram_bot_token}"
+
+    @property
+    def _file_base_url(self) -> str:
+        return f"https://api.telegram.org/file/bot{self.settings.telegram_bot_token}"
+
+    async def send_text(self, chat_id: str, text: str) -> int | None:
+        payload: dict[str, Any] = {
+            "chat_id": str(chat_id),
+            "text": text,
+        }
+        if self.settings.telegram_default_parse_mode:
+            payload["parse_mode"] = self.settings.telegram_default_parse_mode
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            response = await client.post("/sendMessage", json=payload)
+            response.raise_for_status()
+            result = response.json().get("result") or {}
+            message_id = result.get("message_id")
+            return int(message_id) if isinstance(message_id, int) else None
+
+    async def edit_text(self, chat_id: str, message_id: int, text: str) -> None:
+        payload: dict[str, Any] = {
+            "chat_id": str(chat_id),
+            "message_id": int(message_id),
+            "text": text,
+        }
+        if self.settings.telegram_default_parse_mode:
+            payload["parse_mode"] = self.settings.telegram_default_parse_mode
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            response = await client.post("/editMessageText", json=payload)
+            response.raise_for_status()
+
+    async def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as client:
+            response = await client.post("/sendChatAction", json={"chat_id": str(chat_id), "action": action})
+            response.raise_for_status()
+
+    async def fetch_media_bytes(self, file_id: str) -> bytes:
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            response = await client.post("/getFile", json={"file_id": file_id})
+            response.raise_for_status()
+            payload = response.json()
+        file_path = ((payload.get("result") or {}).get("file_path")) if isinstance(payload, dict) else None
+        if not file_path:
+            raise HTTPException(status_code=404, detail="Telegram file_path not found.")
+        async with httpx.AsyncClient(timeout=60.0) as client:
+            response = await client.get(f"{self._file_base_url}/{file_path}")
+            response.raise_for_status()
+            return response.content
+
+
 class OpenRouterClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings

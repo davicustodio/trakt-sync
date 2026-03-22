@@ -73,6 +73,176 @@ async def process_x_save(_: dict, chat_jid: str, requester_phone: str) -> None:
             await pipeline.evolution.send_text(chat_jid, f"Falha ao salvar no Trakt: {exc}")
 
 
+async def _telegram_update_status(pipeline: PipelineService, chat_id: str, status_message_id: int | None, text: str) -> None:
+    if pipeline.telegram is None:
+        return
+    if status_message_id is None:
+        await pipeline.telegram.send_text(chat_id, text)
+        return
+    await pipeline.telegram.edit_text(chat_id, status_message_id, text)
+
+
+async def _telegram_send_stage(
+    pipeline: PipelineService,
+    chat_id: str,
+    status_message_id: int | None,
+    text: str,
+    *,
+    action: str | None = None,
+) -> None:
+    if pipeline.telegram is None:
+        return
+    if action and pipeline.settings.telegram_enable_chat_actions:
+        await pipeline.telegram.send_chat_action(chat_id, action)
+    if pipeline.settings.telegram_enable_progress_messages:
+        await _telegram_update_status(pipeline, chat_id, status_message_id, text)
+
+
+async def process_telegram_x_info(
+    _: dict,
+    chat_id: str,
+    requester_key: str,
+    trigger_message_id: str | None = None,
+    status_message_id: int | None = None,
+) -> None:
+    settings = get_settings()
+    pipeline = PipelineService(settings)
+    async with SessionLocal() as db:
+        service = MessageService(settings, db)
+        try:
+            before_received_at = None
+            if trigger_message_id:
+                command_message = await service.get_message_by_provider_id(trigger_message_id)
+                before_received_at = command_message.received_at
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Etapa 2/6: localizando a ultima imagem valida.",
+                action="typing",
+            )
+            message = await service.find_latest_image(chat_id, requester_key, before_received_at=before_received_at)
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Etapa 3/6: baixando a imagem do Telegram.",
+                action="upload_photo",
+            )
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Etapa 4/6: analisando a imagem com o modelo de visao.",
+                action="typing",
+            )
+            enriched = await pipeline.enrich_from_image(
+                message.provider_message_id,
+                message.media_url,
+                channel="telegram",
+                media_file_id=getattr(message, "media_file_id", None) or message.media_url,
+            )
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Etapa 5/6: consolidando catalogo, ratings e provedores.",
+                action="typing",
+            )
+            await service.save_identified_media(message, enriched)
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Etapa 6/6: montando a resposta final.",
+                action="typing",
+            )
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_media_reply(enriched))
+                for review_message in await pipeline.format_review_messages(enriched):
+                    await pipeline.telegram.send_text(chat_id, review_message)
+                await _telegram_update_status(pipeline, chat_id, status_message_id, "[x-info] Concluido com sucesso.")
+        except AmbiguousTitleError as exc:
+            await _telegram_update_status(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Ambiguidade detectada. Preciso de confirmacao para continuar.",
+            )
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_ambiguous_reply(exc.options))
+        except Exception as exc:  # noqa: BLE001
+            await _telegram_update_status(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Falha durante o processamento.",
+            )
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, _format_x_info_failure(exc))
+
+
+async def process_telegram_x_save(
+    _: dict,
+    chat_id: str,
+    requester_key: str,
+    status_message_id: int | None = None,
+) -> None:
+    settings = get_settings()
+    pipeline = PipelineService(settings)
+    async with SessionLocal() as db:
+        service = MessageService(settings, db)
+        try:
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-save] Etapa 2/5: validando o ultimo titulo identificado.",
+                action="typing",
+            )
+            identified = await service.get_latest_identified_media(requester_key)
+            profile_result = await db.execute(select(PhoneProfile).where(PhoneProfile.phone_number == requester_key))
+            profile = profile_result.scalar_one_or_none()
+            if not profile:
+                raise ValueError(_build_trakt_connect_message(settings, requester_key, "Usuario sem perfil cadastrado para Trakt."))
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-save] Etapa 3/5: validando sua conexao com o Trakt.",
+                action="typing",
+            )
+            connection_result = await db.execute(
+                select(TraktConnection).where(TraktConnection.phone_profile_id == profile.id)
+            )
+            connection = connection_result.scalar_one_or_none()
+            if not connection:
+                raise ValueError(_build_trakt_connect_message(settings, requester_key, "Conta Trakt ainda nao vinculada."))
+            access_token, refresh_token, expires_at = await pipeline.trakt.ensure_fresh_tokens(connection)
+            connection.access_token = access_token
+            connection.refresh_token = refresh_token
+            connection.expires_at = expires_at
+            enriched = pipeline.build_watchlist_item(identified)
+            if not enriched.tmdb_id and not enriched.imdb_id:
+                raise ValueError("Titulo identificado sem IDs externos para salvar no Trakt.")
+            await _telegram_send_stage(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-save] Etapa 4/5: enviando o titulo para a watchlist do Trakt.",
+                action="typing",
+            )
+            await pipeline.trakt.add_to_watchlist(access_token, enriched)
+            await db.commit()
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, f"{identified.title} foi salvo na sua watchlist do Trakt.")
+            await _telegram_update_status(pipeline, chat_id, status_message_id, "[x-save] Concluido com sucesso.")
+        except Exception as exc:  # noqa: BLE001
+            await _telegram_update_status(pipeline, chat_id, status_message_id, "[x-save] Falha durante o processamento.")
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, f"Falha ao salvar no Trakt: {exc}")
+
+
 def _format_x_info_failure(exc: Exception) -> str:
     if isinstance(exc, VisionIdentificationError):
         attempts = exc.attempts[:6]
@@ -108,6 +278,8 @@ class WorkerSettings:
     functions = [
         func(process_x_info, max_tries=3, timeout=180),
         func(process_x_save, max_tries=3, timeout=120),
+        func(process_telegram_x_info, max_tries=3, timeout=180),
+        func(process_telegram_x_save, max_tries=3, timeout=120),
     ]
     redis_settings = redis_settings()
     on_startup = startup

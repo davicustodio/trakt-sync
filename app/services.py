@@ -8,7 +8,7 @@ from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients import EvolutionClient, OMDbClient, OpenRouterClient, TMDbClient, TraktClient
+from app.clients import EvolutionClient, OMDbClient, OpenRouterClient, TMDbClient, TelegramClient, TraktClient
 from app.config import Settings
 from app.models import ChatState, IdentifiedMedia, IncomingMessage, PhoneProfile, TraktConnection
 from app.schemas import EnrichedMedia, NormalizedMessage
@@ -43,7 +43,10 @@ class MessageService:
         message = existing.scalar_one_or_none()
         if message:
             return PersistMessageResult(message=message, created=False)
-        await self.upsert_phone_profile(normalized.requester_phone, normalized.chat_jid)
+        await self.upsert_phone_profile(
+            normalized.requester_phone,
+            normalized.chat_jid if normalized.channel == "whatsapp" else None,
+        )
         message = IncomingMessage(
             provider_message_id=normalized.provider_message_id,
             event_name=normalized.event_name,
@@ -154,18 +157,60 @@ class PipelineService:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self.evolution = EvolutionClient(settings)
+        self.telegram = TelegramClient(settings) if getattr(settings, "telegram_bot_token", None) else None
         self.openrouter = OpenRouterClient(settings)
         self.tmdb = TMDbClient(settings)
         self.omdb = OMDbClient(settings)
         self.trakt = TraktClient(settings)
 
-    async def enrich_from_image(self, provider_message_id: str, media_url: str | None = None) -> EnrichedMedia:
-        image = await self.evolution.fetch_media_bytes(provider_message_id, media_url)
+    def messaging_for(self, channel: str):
+        if channel == "telegram":
+            if self.telegram is None:
+                raise RuntimeError("Telegram client is not configured.")
+            return self.telegram
+        return self.evolution
+
+    async def fetch_media_bytes(
+        self,
+        channel: str,
+        provider_message_id: str,
+        media_url: str | None = None,
+        media_file_id: str | None = None,
+    ) -> bytes:
+        if channel == "telegram":
+            if not media_file_id:
+                raise HTTPException(status_code=404, detail="No Telegram file_id found for this message.")
+            if self.telegram is None:
+                raise RuntimeError("Telegram client is not configured.")
+            return await self.telegram.fetch_media_bytes(media_file_id)
+        return await self.evolution.fetch_media_bytes(provider_message_id, media_url)
+
+    async def enrich_from_image(
+        self,
+        provider_message_id: str,
+        media_url: str | None = None,
+        *,
+        channel: str = "whatsapp",
+        media_file_id: str | None = None,
+    ) -> EnrichedMedia:
+        image = await self.fetch_media_bytes(channel, provider_message_id, media_url, media_file_id)
         candidate = await self.openrouter.identify_title(image)
-        enriched = await self.tmdb.search_and_enrich(candidate)
+        try:
+            enriched = await self.tmdb.search_and_enrich(candidate)
+        except HTTPException as exc:
+            if exc.status_code != 404:
+                raise
+            enriched = EnrichedMedia(
+                title=candidate.detected_title or "Titulo nao confirmado",
+                media_type="series" if candidate.media_type == "series" else "movie",
+                year=candidate.year,
+                confidence=candidate.confidence,
+                overview="Identificacao parcial: nao consegui confirmar o catalogo no TMDb.",
+                payload={"fallback": "vision-only", "visible_text": candidate.visible_text, "alt_titles": candidate.alt_titles},
+            )
         return await self.omdb.attach_ratings(enriched)
 
-    async def format_whatsapp_reply(self, enriched: EnrichedMedia) -> str:
+    async def format_media_reply(self, enriched: EnrichedMedia) -> str:
         ratings_lines = [f"- {label}: {value}" for label, value in enriched.ratings.items()]
         providers_lines = [f"- {provider}" for provider in enriched.providers[:6]] or [
             "- Nenhuma disponibilidade confirmada no Brasil no momento."
@@ -192,6 +237,9 @@ class PipelineService:
                 "- x-save",
             ]
         )
+
+    async def format_whatsapp_reply(self, enriched: EnrichedMedia) -> str:
+        return await self.format_media_reply(enriched)
 
     async def format_review_messages(self, enriched: EnrichedMedia) -> list[str]:
         messages: list[str] = []

@@ -141,6 +141,42 @@ def test_telegram_webhook_handles_start_inline(monkeypatch) -> None:
     ]
 
 
+def test_telegram_webhook_handles_trakt_connect_inline(monkeypatch) -> None:
+    app.dependency_overrides[settings_dep] = lambda: build_settings()
+    app.dependency_overrides[db_dep] = fake_db_dep
+    sent: list[str] = []
+
+    class FakeTelegramClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> int | None:
+            sent.append(text)
+            return 1
+
+    async def fake_persist(self, normalized):
+        from app.services import PersistMessageResult
+        from types import SimpleNamespace
+
+        return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
+
+    monkeypatch.setattr("app.main.TelegramClient", FakeTelegramClient)
+    monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
+            json=build_payload(text="/trakt-connect"),
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "command": "/trakt-connect"}
+    assert sent
+    assert sent[0].startswith("Abra este link para conectar sua conta Trakt:\nhttps://trakt.tv/oauth/authorize?")
+
+
 def test_trakt_callback_preserves_telegram_requester_key(monkeypatch) -> None:
     app.dependency_overrides[settings_dep] = lambda: build_settings()
     received: list[str] = []

@@ -112,9 +112,8 @@ class TelegramClient:
             "chat_id": str(chat_id),
             "text": text,
         }
-        resolved_parse_mode = parse_mode if parse_mode is not None else self.settings.telegram_default_parse_mode
-        if resolved_parse_mode:
-            payload["parse_mode"] = resolved_parse_mode
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
             response = await client.post("/sendMessage", json=payload)
             response.raise_for_status()
@@ -128,9 +127,8 @@ class TelegramClient:
             "message_id": int(message_id),
             "text": text,
         }
-        resolved_parse_mode = parse_mode if parse_mode is not None else self.settings.telegram_default_parse_mode
-        if resolved_parse_mode:
-            payload["parse_mode"] = resolved_parse_mode
+        if parse_mode:
+            payload["parse_mode"] = parse_mode
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
             response = await client.post("/editMessageText", json=payload)
             response.raise_for_status()

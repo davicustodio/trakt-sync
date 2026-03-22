@@ -53,6 +53,11 @@ async def test_format_review_messages_returns_three_separate_messages() -> None:
     pipeline = PipelineService(build_settings())
     enriched = types.SimpleNamespace(reviews=["Review completa 1", "Review completa 2", "Review completa 3"])
 
+    async def fake_translate(reviews, *, title=None):
+        return reviews
+
+    pipeline.openrouter.translate_reviews_to_pt_br = fake_translate
+
     messages = await pipeline.format_review_messages(enriched)
 
     assert messages == [
@@ -78,7 +83,11 @@ async def test_format_review_messages_falls_back_to_openrouter_when_tmdb_has_no_
     async def fake_generate_review_blurbs(_enriched):
         return ["Sintese 1", "Sintese 2", "Sintese 3"]
 
+    async def fake_translate(reviews, *, title=None):
+        return reviews
+
     pipeline.openrouter.generate_review_blurbs = fake_generate_review_blurbs
+    pipeline.openrouter.translate_reviews_to_pt_br = fake_translate
 
     messages = await pipeline.format_review_messages(enriched)
 
@@ -86,6 +95,38 @@ async def test_format_review_messages_falls_back_to_openrouter_when_tmdb_has_no_
         "Review 1\nSintese 1",
         "Review 2\nSintese 2",
         "Review 3\nSintese 3",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_format_review_messages_translates_and_completes_to_three_reviews() -> None:
+    pipeline = PipelineService(build_settings())
+    enriched = types.SimpleNamespace(
+        title="The Godfather",
+        year=1972,
+        media_type="movie",
+        overview="Crime organizado em uma familia mafiosa.",
+        genres=["Crime", "Drama"],
+        ratings={"IMDb": "9.2/10"},
+        reviews=["One of the best scripts of twentieth century cinema."],
+    )
+
+    async def fake_generate_review_blurbs(_enriched):
+        return ["Generated review 2", "Generated review 3", "Generated review 4"]
+
+    async def fake_translate(reviews, *, title=None):
+        assert title == "The Godfather"
+        return ["Traducao 1", "Traducao 2", "Traducao 3"]
+
+    pipeline.openrouter.generate_review_blurbs = fake_generate_review_blurbs
+    pipeline.openrouter.translate_reviews_to_pt_br = fake_translate
+
+    messages = await pipeline.format_review_messages(enriched)
+
+    assert messages == [
+        "Review 1\nTraducao 1",
+        "Review 2\nTraducao 2",
+        "Review 3\nTraducao 3",
     ]
 
 

@@ -242,20 +242,24 @@ class PipelineService:
         return await self.format_media_reply(enriched)
 
     async def format_review_messages(self, enriched: EnrichedMedia) -> list[str]:
-        messages: list[str] = []
-        reviews = list(enriched.reviews[:3])
+        reviews = [str(review).strip() for review in enriched.reviews[:3] if str(review).strip()]
+        if len(reviews) < 3:
+            generated = await self.openrouter.generate_review_blurbs(enriched)
+            for review in generated:
+                review_text = str(review).strip()
+                if review_text and review_text not in reviews:
+                    reviews.append(review_text)
+                if len(reviews) == 3:
+                    break
         if not reviews:
-            reviews = await self.openrouter.generate_review_blurbs(enriched)
-        if not reviews:
-            reviews = [
+            return [
                 "Review 1\nNao encontrei review textual publica para este titulo. A recepcao parece mista pelos ratings disponiveis.",
                 "Review 2\nOs dados de catalogo indicam uma resposta critica limitada. Use este resultado como referencia inicial, nao como consenso.",
                 "Review 3\nSe quiser, envie outra imagem ou contexto adicional para eu refinar a identificacao e a leitura critica do titulo.",
             ]
-            return reviews
-        for index, review in enumerate(reviews[:3]):
-            messages.append(f"Review {index + 1}\n{review}")
-        return messages
+        localized = await self.openrouter.translate_reviews_to_pt_br(reviews, title=getattr(enriched, "title", None))
+        final_reviews = localized[:3] if localized else reviews[:3]
+        return [f"Review {index + 1}\n{review}" for index, review in enumerate(final_reviews)]
 
     async def format_ambiguous_reply(self, options: list[str]) -> str:
         lines = [f"{index + 1}. {option}" for index, option in enumerate(options[:3])]

@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from functools import lru_cache
 
+import json
+
 from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -108,7 +110,7 @@ class Settings(BaseSettings):
             if not text:
                 return []
             if text.startswith("["):
-                return text
+                return json.loads(text)
             return [item.strip() for item in text.split(",") if item.strip()]
         return value
 

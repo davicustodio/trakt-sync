@@ -143,7 +143,7 @@ async def _handle_telegram_utility_command(
     if command == "/help":
         await telegram.send_text(
             normalized.chat_jid,
-            "/start\n/help\n/whoami\n/trakt-connect\n/trakt-status\nx-info\nx-save",
+            "/start\n/help\n/whoami\n/trakt-connect\n/trakt-status\n/admin-help\nx-info\nx-save",
         )
         return {"status": "accepted", "command": command}
 
@@ -181,6 +181,24 @@ async def _handle_telegram_utility_command(
         await telegram.send_text(
             normalized.chat_jid,
             f"Conta Trakt conectada. Usuario: {connection.trakt_username or 'desconhecido'}.",
+        )
+        return {"status": "accepted", "command": command}
+
+    if command == "/admin-help":
+        admin_url = f"{settings.app_base_url.rstrip('/')}/admin/trakt"
+        if settings.admin_shared_secret:
+            admin_url = f"{admin_url}?token={settings.admin_shared_secret}"
+        await telegram.send_text(
+            normalized.chat_jid,
+            (
+                "Controle de acesso do bot\n"
+                "1. No Dokploy, abra a app e edite as env vars.\n"
+                "2. Defina TELEGRAM_REQUIRE_APPROVAL=true.\n"
+                f"3. Defina TELEGRAM_AUTO_APPROVED_USER_KEYS={normalized.requester_phone} para manter seu acesso.\n"
+                "4. Compartilhe o bot com seus amigos e peca para enviarem /start.\n"
+                f"5. Abra o painel admin: {admin_url}\n"
+                "6. Na coluna Acesso Telegram, clique em Aprovar ou Revogar para cada usuario."
+            ),
         )
         return {"status": "accepted", "command": command}
 
@@ -256,7 +274,14 @@ async def handle_normalized_message(
         access_granted = await _check_telegram_access(normalized, settings, db)
         if not access_granted:
             return await _handle_blocked_telegram_user(normalized, settings)
-    if normalized.channel == "telegram" and command in {"/start", "/help", "/whoami", "/trakt-connect", "/trakt-status"}:
+    if normalized.channel == "telegram" and command in {
+        "/start",
+        "/help",
+        "/whoami",
+        "/trakt-connect",
+        "/trakt-status",
+        "/admin-help",
+    }:
         return await _handle_telegram_utility_command(normalized, settings, db)
     if command in {"x-info", "x-save"}:
         if normalized.channel == "telegram":

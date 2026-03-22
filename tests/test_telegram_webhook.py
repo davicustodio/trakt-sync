@@ -194,6 +194,51 @@ def test_telegram_webhook_handles_trakt_connect_inline(monkeypatch) -> None:
     ]
 
 
+def test_telegram_webhook_handles_admin_help_inline(monkeypatch) -> None:
+    settings = build_settings()
+    settings.admin_shared_secret = "admin123"
+    app.dependency_overrides[settings_dep] = lambda: settings
+    app.dependency_overrides[db_dep] = fake_db_dep
+    sent: list[str] = []
+
+    class FakeTelegramClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> int | None:
+            sent.append(text)
+            return 1
+
+    async def fake_persist(self, normalized):
+        from app.services import PersistMessageResult
+        from types import SimpleNamespace
+
+        return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
+
+    monkeypatch.setattr("app.main.TelegramClient", FakeTelegramClient)
+    monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
+            json=build_payload(text="/admin-help"),
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "command": "/admin-help"}
+    assert sent == [
+        "Controle de acesso do bot\n"
+        "1. No Dokploy, abra a app e edite as env vars.\n"
+        "2. Defina TELEGRAM_REQUIRE_APPROVAL=true.\n"
+        "3. Defina TELEGRAM_AUTO_APPROVED_USER_KEYS=telegram_321 para manter seu acesso.\n"
+        "4. Compartilhe o bot com seus amigos e peca para enviarem /start.\n"
+        "5. Abra o painel admin: http://localhost:8000/admin/trakt?token=admin123\n"
+        "6. Na coluna Acesso Telegram, clique em Aprovar ou Revogar para cada usuario."
+    ]
+
+
 def test_telegram_webhook_blocks_unapproved_user_when_approval_required(monkeypatch) -> None:
     settings = build_settings()
     settings.telegram_require_approval = True

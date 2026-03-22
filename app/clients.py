@@ -353,6 +353,11 @@ class OpenRouterClient:
         attempts.extend(query_attempts)
         if parsed.detected_title and parsed.confidence >= 0.75:
             return parsed
+
+        rescue_candidate, rescue_attempts = await self._query_scene_rescue_candidate(image_bytes, ocr_hint)
+        attempts.extend(rescue_attempts)
+        if rescue_candidate.detected_title and rescue_candidate.confidence >= 0.55:
+            return rescue_candidate
         raise VisionIdentificationError("Nao consegui identificar o titulo com confianca suficiente.", attempts)
 
     async def generate_review_blurbs(self, enriched: EnrichedMedia) -> list[str]:
@@ -592,12 +597,80 @@ class OpenRouterClient:
             best_line = cleaned.title() if cleaned.isupper() else cleaned
         return best_line
 
-    async def _query_candidate(self, image_b64: str, prompt: str, *, use_json_mode: bool) -> tuple[VisionCandidate, list[str]]:
+    def _build_llm_vision_variants(self, image_bytes: bytes) -> list[tuple[str, bytes]]:
+        variants = [("original", image_bytes)]
+        try:
+            from PIL import Image, ImageOps
+        except Exception:
+            return variants
+
+        try:
+            with Image.open(BytesIO(image_bytes)) as source:
+                image = source.convert("RGB")
+                width, height = image.size
+
+                frame_top = int(height * 0.12)
+                frame_bottom = int(height * 0.86)
+                frame_left = int(width * 0.06)
+                frame_right = int(width * 0.94)
+                if frame_right > frame_left and frame_bottom > frame_top:
+                    frame_crop = image.crop((frame_left, frame_top, frame_right, frame_bottom))
+                    variants.append(("frame-crop", self._encode_image_variant(frame_crop)))
+
+                subtitle_top = int(height * 0.54)
+                subtitle_bottom = int(height * 0.82)
+                if subtitle_bottom > subtitle_top:
+                    subtitle_crop = ImageOps.autocontrast(image.crop((frame_left, subtitle_top, frame_right, subtitle_bottom)))
+                    variants.append(("subtitle-crop", self._encode_image_variant(subtitle_crop)))
+        except Exception:
+            return variants
+        return variants
+
+    async def _query_scene_rescue_candidate(
+        self,
+        image_bytes: bytes,
+        ocr_hint: VisionCandidate | None,
+    ) -> tuple[VisionCandidate, list[str]]:
+        visible_text = ", ".join(ocr_hint.visible_text[:8]) if ocr_hint and ocr_hint.visible_text else "sem OCR util"
+        hint_title = ocr_hint.detected_title if ocr_hint and ocr_hint.detected_title else "sem palpite"
+        prompt = (
+            "Voce esta analisando um frame dificil de filme ou serie, possivelmente uma foto de tela com legenda. "
+            "Use rosto, figurino, cinematografia, nomes na legenda e qualquer texto visivel para inferir o titulo mais provavel. "
+            "Retorne JSON apenas com: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
+            "Se houver um palpite plausivel, retorne-o mesmo com confianca moderada; nao invente certeza.\n\n"
+            f"Palpite OCR: {hint_title}\n"
+            f"Texto OCR visivel: {visible_text}\n"
+        )
         attempts: list[str] = []
-        model_sequence = [*self.settings.openrouter_vision_models]
-        if self.settings.openrouter_enable_paid_fallback:
+        paid_models = list(dict.fromkeys(self.settings.openrouter_paid_vision_models))
+        if not paid_models:
+            return VisionCandidate(), attempts
+        for variant_name, variant_bytes in self._build_llm_vision_variants(image_bytes):
+            variant_b64 = base64.b64encode(variant_bytes).decode("ascii")
+            candidate, variant_attempts = await self._query_candidate(
+                variant_b64,
+                prompt,
+                use_json_mode=True,
+                models=paid_models,
+            )
+            attempts.extend([f"{variant_name}::{attempt}" for attempt in variant_attempts])
+            if candidate.detected_title:
+                return candidate, attempts
+        return VisionCandidate(), attempts
+
+    async def _query_candidate(
+        self,
+        image_b64: str,
+        prompt: str,
+        *,
+        use_json_mode: bool,
+        models: list[str] | None = None,
+    ) -> tuple[VisionCandidate, list[str]]:
+        attempts: list[str] = []
+        model_sequence = [*(models or self.settings.openrouter_vision_models)]
+        if models is None and self.settings.openrouter_enable_paid_fallback:
             model_sequence.extend(self.settings.openrouter_paid_vision_models)
-        model_sequence.append(self.settings.openrouter_emergency_router)
+            model_sequence.append(self.settings.openrouter_emergency_router)
         async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=90.0) as client:
             for model in model_sequence:
                 payload = {

@@ -389,6 +389,39 @@ async def test_query_candidate_uses_paid_fallback_after_free_models(monkeypatch)
 
 
 @pytest.mark.asyncio
+async def test_identify_title_uses_paid_scene_rescue_after_free_failures(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+    client.settings.openrouter_vision_models = ["free-a:free", "free-b:free"]
+    client.settings.openrouter_paid_vision_models = ["google/gemini-2.5-flash-lite", "openai/gpt-4.1-mini"]
+
+    monkeypatch.setattr(client, "_identify_title_from_ocr", lambda image_bytes: None)
+    monkeypatch.setattr(client, "_build_llm_vision_variants", lambda image_bytes: [("original", image_bytes)])
+
+    calls: list[tuple[list[str] | None, bool]] = []
+
+    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool, models=None):
+        calls.append((models, use_json_mode))
+        if models is None:
+            return VisionCandidate(), ["free-a: RuntimeError", "free-b: RuntimeError"]
+        return (
+            VisionCandidate(detected_title="Hostage", media_type="movie", year=2005, confidence=0.62),
+            ["google/gemini-2.5-flash-lite: Hostage (confidence=0.62, type=movie)"],
+        )
+
+    monkeypatch.setattr(client, "_query_candidate", fake_query_candidate)
+
+    candidate = await client.identify_title(b"fake-image")
+
+    assert candidate.detected_title == "Hostage"
+    assert candidate.year == 2005
+    assert calls == [
+        (None, True),
+        (None, False),
+        (["google/gemini-2.5-flash-lite", "openai/gpt-4.1-mini"], True),
+    ]
+
+
+@pytest.mark.asyncio
 async def test_translate_reviews_tries_multiple_free_models_until_success(monkeypatch) -> None:
     requested_models: list[str] = []
 

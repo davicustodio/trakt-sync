@@ -10,6 +10,7 @@ from app.exceptions import AmbiguousTitleError, VisionIdentificationError
 from app.models import PhoneProfile, TraktConnection
 from app.queue import redis_settings
 from app.services import MessageService, PipelineService
+from app.utils import TELEGRAM_USER_KEY_PREFIX
 
 
 async def startup(_: dict) -> None:
@@ -265,6 +266,8 @@ def _format_x_info_failure(exc: Exception) -> str:
 
 
 def _build_trakt_connect_message(settings, requester_phone: str, reason: str) -> str:
+    if requester_phone.startswith(TELEGRAM_USER_KEY_PREFIX):
+        return f"{reason} Envie /trakt-connect, conclua a autorizacao da sua conta Trakt e depois envie x-save novamente."
     base = settings.app_base_url.rstrip("/")
     if settings.admin_shared_secret:
         return (

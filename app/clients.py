@@ -249,6 +249,35 @@ class OpenRouterClient:
             return []
         return [compact_text(str(review), 260) for review in reviews if str(review).strip()][:3]
 
+    async def translate_reviews_to_pt_br(self, reviews: list[str], *, title: str | None = None) -> list[str]:
+        cleaned = [compact_text(str(review), 1200) for review in reviews if str(review).strip()]
+        if not cleaned:
+            return []
+        prompt = (
+            "Converta as reviews abaixo para portugues brasileiro natural. "
+            "Se ja estiverem em portugues, normalize para pt-BR. "
+            "Preserve o sentido, remova markdown desnecessario e retorne JSON puro no formato "
+            "{\"reviews\":[\"...\",\"...\"]}. Mantenha a mesma quantidade de reviews recebida.\n\n"
+            f"Titulo: {title or 'desconhecido'}\n"
+            f"Reviews: {cleaned}"
+        )
+        payload = {
+            "model": self.settings.openrouter_emergency_router,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+        }
+        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=45.0) as client:
+            response = await client.post("/chat/completions", headers=self._headers(), json=payload)
+            response.raise_for_status()
+            body = response.json()
+        message = (((body.get("choices") or [{}])[0]).get("message") or {}).get("content", "")
+        data = parse_json_response(message) if isinstance(message, str) else {}
+        translated = data.get("reviews") if isinstance(data, dict) else []
+        if not isinstance(translated, list):
+            return cleaned
+        normalized = [compact_text(str(review), 1200) for review in translated if str(review).strip()]
+        return normalized[: len(cleaned)] or cleaned
+
     def _identify_title_from_ocr(self, image_bytes: bytes) -> VisionCandidate | None:
         if self._ocr_engine is None:
             try:
@@ -570,11 +599,18 @@ class TMDbClient:
             for key, label in (("flatrate", "assinatura"), ("rent", "aluguel"), ("buy", "compra")):
                 for entry in providers.get(key, [])[:3]:
                     provider_lines.append(f"{entry['provider_name']} ({label})")
-            reviews = []
-            for review in (payload.get("reviews") or {}).get("results", [])[:3]:
+            review_results = (payload.get("reviews") or {}).get("results", []) or []
+            scored_reviews: list[tuple[float, str]] = []
+            for review in review_results:
                 content = " ".join(str(review.get("content") or "").split())
-                if content:
-                    reviews.append(content)
+                if not content:
+                    continue
+                author_rating = ((review.get("author_details") or {}).get("rating")) or 0
+                score = float(author_rating) * 10
+                score += min(len(content), 2400) / 400
+                scored_reviews.append((score, content))
+            scored_reviews.sort(key=lambda item: item[0], reverse=True)
+            reviews = [content for _, content in scored_reviews[:3]]
             return EnrichedMedia(
                 title=payload.get("title") or payload.get("name") or candidate.detected_title or "Unknown",
                 media_type=media_type,

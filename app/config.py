@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from functools import lru_cache
 
-from pydantic import Field, computed_field
+from pydantic import Field, computed_field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -93,6 +93,24 @@ class Settings(BaseSettings):
     evolution_polling_enabled: bool = True
     evolution_polling_interval_seconds: int = 15
     evolution_polling_limit: int = 12
+
+    @field_validator(
+        "telegram_auto_approved_user_keys",
+        "openrouter_free_text_models",
+        "openrouter_vision_models",
+        "openrouter_paid_vision_models",
+        mode="before",
+    )
+    @classmethod
+    def parse_list_settings(cls, value):
+        if isinstance(value, str):
+            text = value.strip()
+            if not text:
+                return []
+            if text.startswith("["):
+                return text
+            return [item.strip() for item in text.split(",") if item.strip()]
+        return value
 
     @computed_field
     @property

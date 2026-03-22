@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from urllib.parse import parse_qs, urlparse
 
 
 class FakeDB:
@@ -11,7 +12,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import app, db_dep, settings_dep
-from app.utils import encode_state
+from app.utils import decode_state, encode_state
 
 
 async def fake_db_dep() -> AsyncIterator[object]:
@@ -226,3 +227,18 @@ def test_trakt_callback_preserves_telegram_requester_key(monkeypatch) -> None:
     app.dependency_overrides.clear()
     assert response.status_code == 200
     assert received == ["telegram_321"]
+
+
+def test_admin_trakt_connect_preserves_telegram_requester_key(monkeypatch) -> None:
+    app.dependency_overrides[settings_dep] = lambda: build_settings()
+
+    with TestClient(app) as client:
+        response = client.get("/admin/trakt/connect/telegram_321?token=test", follow_redirects=False)
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 302
+    location = response.headers["location"]
+    assert location.startswith("https://trakt.tv/oauth/authorize?")
+    state = parse_qs(urlparse(location).query)["state"][0]
+    payload = decode_state(state, "test")
+    assert payload["phone_number"] == "telegram_321"

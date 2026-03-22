@@ -451,7 +451,7 @@ async def connect_trakt(
 ) -> RedirectResponse:
     client = TraktClient(settings)
     state = encode_state(
-        {"phone_number": normalize_phone(phone_number), "generated_at": datetime.now(UTC).isoformat()},
+        {"phone_number": normalize_requester_key(phone_number), "generated_at": datetime.now(UTC).isoformat()},
         settings.trakt_client_secret,
     )
     return RedirectResponse(client.build_authorize_url(state), status_code=302)

@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.auth import canonical_owner_phone, is_authorized_self_chat
-from app.clients import EvolutionClient, TelegramClient, TraktClient
+from app.clients import EvolutionClient, OpenRouterClient, TelegramClient, TraktClient
 from app.config import Settings, get_settings
 from app.db import SessionLocal, get_db_session, init_db
 from app.models import PhoneProfile, TraktConnection
@@ -317,6 +317,7 @@ async def evolution_webhook(
     db: Annotated[AsyncSession, Depends(db_dep)],
 ) -> JSONResponse:
     payload = await request.json()
+    background_tasks.add_task(OpenRouterClient(settings).refresh_free_text_models_if_due)
     if settings.evolution_webhook_secret:
         provided = request.headers.get("X-Evolution-Secret")
         if provided != settings.evolution_webhook_secret:
@@ -357,6 +358,7 @@ async def telegram_webhook(
     db: Annotated[AsyncSession, Depends(db_dep)],
 ) -> JSONResponse:
     payload = await request.json()
+    background_tasks.add_task(OpenRouterClient(settings).refresh_free_text_models_if_due)
     if settings.telegram_webhook_secret:
         provided = request.headers.get("X-Telegram-Bot-Api-Secret-Token")
         if provided != settings.telegram_webhook_secret:

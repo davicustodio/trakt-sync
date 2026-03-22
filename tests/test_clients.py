@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import base64
+import json
 from types import SimpleNamespace
 
 import pytest
@@ -385,6 +386,117 @@ async def test_query_candidate_uses_paid_fallback_after_free_models(monkeypatch)
         "google/gemma-3-27b-it:free: RuntimeError",
         "google/gemini-2.5-flash: Inland Empire (confidence=0.97, type=movie)",
     ]
+
+
+@pytest.mark.asyncio
+async def test_translate_reviews_tries_multiple_free_models_until_success(monkeypatch) -> None:
+    requested_models: list[str] = []
+
+    class FakeResponse:
+        def __init__(self, model: str) -> None:
+            self.model = model
+
+        def raise_for_status(self) -> None:
+            if self.model != "model-c:free":
+                raise RuntimeError("model failed")
+
+        def json(self) -> dict:
+            return {"choices": [{"message": {"content": '{"reviews":["Review em pt-BR"]}'}}]}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, path: str, headers: dict[str, str], json: dict[str, object]) -> FakeResponse:
+            requested_models.append(str(json["model"]))
+            return FakeResponse(str(json["model"]))
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    settings = build_settings()
+    settings.openrouter_free_text_models = ["model-a:free", "model-b:free", "model-c:free"]
+    settings.openrouter_emergency_router = "openrouter/free"
+    OpenRouterClient._free_text_models_cache = None
+    OpenRouterClient._free_text_models_updated_at = None
+    client = OpenRouterClient(settings)
+
+    translated = await client.translate_reviews_to_pt_br(["Original review"], title="Movie")
+
+    assert translated == ["Review em pt-BR"]
+    assert requested_models == ["model-a:free", "model-b:free", "model-c:free"]
+
+
+@pytest.mark.asyncio
+async def test_refresh_free_text_models_if_due_updates_cache_and_file(monkeypatch, tmp_path) -> None:
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {
+                "data": [
+                    {
+                        "id": "paid-model",
+                        "pricing": {"prompt": "0.1", "completion": "0.2"},
+                        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+                        "context_length": 128000,
+                    },
+                    {
+                        "id": "free-vision-only:free",
+                        "pricing": {"prompt": "0", "completion": "0"},
+                        "architecture": {"input_modalities": ["image"], "output_modalities": ["text"]},
+                        "context_length": 128000,
+                    },
+                    {
+                        "id": "openai/gpt-oss-120b:free",
+                        "pricing": {"prompt": "0", "completion": "0"},
+                        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+                        "context_length": 128000,
+                    },
+                    {
+                        "id": "another-free:free",
+                        "pricing": {"prompt": "0", "completion": "0"},
+                        "architecture": {"input_modalities": ["text"], "output_modalities": ["text"]},
+                        "context_length": 64000,
+                    },
+                ]
+            }
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, path: str, headers: dict[str, str]) -> FakeResponse:
+            assert path == "/models"
+            return FakeResponse()
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    settings = build_settings()
+    settings.openrouter_free_text_models = ["openai/gpt-oss-120b:free", "openrouter/free"]
+    settings.openrouter_free_models_cache_file = str(tmp_path / "openrouter_free_models.json")
+    settings.openrouter_free_models_refresh_interval_seconds = 1
+    OpenRouterClient._free_text_models_cache = None
+    OpenRouterClient._free_text_models_updated_at = None
+
+    client = OpenRouterClient(settings)
+    await client.refresh_free_text_models_if_due()
+
+    assert client._text_task_model_sequence()[:2] == ["openai/gpt-oss-120b:free", "another-free:free"]
+    cache_payload = json.loads((tmp_path / "openrouter_free_models.json").read_text(encoding="utf-8"))
+    assert cache_payload["models"][:2] == ["openai/gpt-oss-120b:free", "another-free:free"]
 
 
 def test_identify_title_falls_back_to_legacy_ocr_backend() -> None:

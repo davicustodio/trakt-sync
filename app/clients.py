@@ -1,13 +1,16 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import binascii
 import contextlib
+import json
 import os
 import re
 import tempfile
 from io import BytesIO
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlencode
 
@@ -153,10 +156,15 @@ class TelegramClient:
 
 
 class OpenRouterClient:
+    _free_text_models_cache: list[str] | None = None
+    _free_text_models_updated_at: datetime | None = None
+    _free_text_models_lock: asyncio.Lock | None = None
+
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
         self._ocr_engine = None
         self._ocr_backend: str | None = None
+        self._hydrate_free_text_models_cache()
 
     def _headers(self) -> dict[str, str]:
         headers = {
@@ -167,6 +175,136 @@ class OpenRouterClient:
         if self.settings.openrouter_site_url:
             headers["HTTP-Referer"] = self.settings.openrouter_site_url
         return headers
+
+    @classmethod
+    def _cache_lock(cls) -> asyncio.Lock:
+        if cls._free_text_models_lock is None:
+            cls._free_text_models_lock = asyncio.Lock()
+        return cls._free_text_models_lock
+
+    def _free_models_cache_path(self) -> Path:
+        return Path(self.settings.openrouter_free_models_cache_file)
+
+    def _hydrate_free_text_models_cache(self) -> None:
+        cls = self.__class__
+        if cls._free_text_models_cache is not None:
+            return
+        cls._free_text_models_cache = list(self.settings.openrouter_free_text_models)
+        cache_path = self._free_models_cache_path()
+        if not cache_path.exists():
+            return
+        try:
+            payload = json.loads(cache_path.read_text(encoding="utf-8"))
+        except Exception:
+            return
+        models = payload.get("models") if isinstance(payload, dict) else None
+        if isinstance(models, list):
+            cleaned = [str(model).strip() for model in models if str(model).strip()]
+            if cleaned:
+                cls._free_text_models_cache = cleaned
+        updated_at = payload.get("updated_at") if isinstance(payload, dict) else None
+        if isinstance(updated_at, str):
+            with contextlib.suppress(ValueError):
+                cls._free_text_models_updated_at = datetime.fromisoformat(updated_at)
+
+    def _persist_free_text_models_cache(self, models: list[str], updated_at: datetime) -> None:
+        cache_path = self._free_models_cache_path()
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        cache_path.write_text(
+            json.dumps({"updated_at": updated_at.isoformat(), "models": models}, ensure_ascii=True, indent=2),
+            encoding="utf-8",
+        )
+
+    def _text_task_model_sequence(self) -> list[str]:
+        available = list(self.__class__._free_text_models_cache or self.settings.openrouter_free_text_models)
+        preferred = [str(model).strip() for model in self.settings.openrouter_free_text_models if str(model).strip()]
+        preferred_set = set(available)
+        ordered: list[str] = []
+        for model in preferred:
+            if model in preferred_set and model not in ordered:
+                ordered.append(model)
+        for model in available:
+            if model not in ordered:
+                ordered.append(model)
+        if self.settings.openrouter_emergency_router not in ordered:
+            ordered.append(self.settings.openrouter_emergency_router)
+        return ordered
+
+    async def refresh_free_text_models_if_due(self) -> None:
+        self._hydrate_free_text_models_cache()
+        now = datetime.now(UTC)
+        updated_at = self.__class__._free_text_models_updated_at
+        if updated_at and now - updated_at < timedelta(seconds=self.settings.openrouter_free_models_refresh_interval_seconds):
+            return
+        async with self._cache_lock():
+            updated_at = self.__class__._free_text_models_updated_at
+            now = datetime.now(UTC)
+            if updated_at and now - updated_at < timedelta(
+                seconds=self.settings.openrouter_free_models_refresh_interval_seconds
+            ):
+                return
+            models = await self._fetch_free_text_models()
+            if not models:
+                return
+            self.__class__._free_text_models_cache = models
+            self.__class__._free_text_models_updated_at = now
+            with contextlib.suppress(OSError):
+                self._persist_free_text_models_cache(models, now)
+
+    async def _fetch_free_text_models(self) -> list[str]:
+        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=30.0) as client:
+            response = await client.get("/models", headers=self._headers())
+            response.raise_for_status()
+            payload = response.json()
+
+        preferred_rank = {
+            model: index for index, model in enumerate(self.settings.openrouter_free_text_models)
+        }
+        collected: list[tuple[int, int, str]] = []
+        for item in payload.get("data", []) if isinstance(payload, dict) else []:
+            if not isinstance(item, dict):
+                continue
+            model_id = str(item.get("id") or "").strip()
+            if not model_id:
+                continue
+            pricing = item.get("pricing") or {}
+            if str(pricing.get("prompt")) != "0" or str(pricing.get("completion")) != "0":
+                continue
+            architecture = item.get("architecture") or {}
+            input_modalities = {str(modality).lower() for modality in architecture.get("input_modalities") or []}
+            output_modalities = {str(modality).lower() for modality in architecture.get("output_modalities") or []}
+            if input_modalities and "text" not in input_modalities:
+                continue
+            if output_modalities and "text" not in output_modalities:
+                continue
+            context_length = int(item.get("context_length") or 0)
+            collected.append((preferred_rank.get(model_id, 999), -context_length, model_id))
+
+        collected.sort(key=lambda item: (item[0], item[1], item[2]))
+        models = [model_id for _, _, model_id in collected]
+        return models or list(self.settings.openrouter_free_text_models)
+
+    async def _run_text_json_task(self, prompt: str) -> dict[str, Any] | None:
+        payload_base = {
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+        }
+        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=45.0) as client:
+            for model in self._text_task_model_sequence():
+                payload = {"model": model, **payload_base}
+                try:
+                    response = await client.post("/chat/completions", headers=self._headers(), json=payload)
+                    response.raise_for_status()
+                    body = response.json()
+                    message = (((body.get("choices") or [{}])[0]).get("message") or {}).get("content", "")
+                    if not isinstance(message, str) or not message.strip():
+                        continue
+                    data = parse_json_response(message)
+                    if isinstance(data, dict):
+                        return data
+                except Exception:
+                    continue
+        return None
 
     def _build_legacy_ocr_engine(self):
         from rapidocr_onnxruntime import RapidOCR
@@ -231,17 +369,7 @@ class OpenRouterClient:
             f"Generos: {', '.join(enriched.genres) or 'sem generos'}\n"
             f"Ratings: {ratings_summary}\n"
         )
-        payload = {
-            "model": self.settings.openrouter_emergency_router,
-            "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"},
-        }
-        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=45.0) as client:
-            response = await client.post("/chat/completions", headers=self._headers(), json=payload)
-            response.raise_for_status()
-            body = response.json()
-        message = (((body.get("choices") or [{}])[0]).get("message") or {}).get("content", "")
-        data = parse_json_response(message) if isinstance(message, str) else {}
+        data = await self._run_text_json_task(prompt) or {}
         reviews = data.get("reviews") if isinstance(data, dict) else []
         if not isinstance(reviews, list):
             return []
@@ -259,17 +387,7 @@ class OpenRouterClient:
             f"Titulo: {title or 'desconhecido'}\n"
             f"Reviews: {cleaned}"
         )
-        payload = {
-            "model": self.settings.openrouter_emergency_router,
-            "messages": [{"role": "user", "content": prompt}],
-            "response_format": {"type": "json_object"},
-        }
-        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=45.0) as client:
-            response = await client.post("/chat/completions", headers=self._headers(), json=payload)
-            response.raise_for_status()
-            body = response.json()
-        message = (((body.get("choices") or [{}])[0]).get("message") or {}).get("content", "")
-        data = parse_json_response(message) if isinstance(message, str) else {}
+        data = await self._run_text_json_task(prompt) or {}
         translated = data.get("reviews") if isinstance(data, dict) else []
         if not isinstance(translated, list):
             return cleaned

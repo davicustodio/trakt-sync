@@ -54,6 +54,7 @@ def test_telegram_webhook_acknowledges_and_schedules_x_info(monkeypatch) -> None
     app.dependency_overrides[db_dep] = fake_db_dep
     sent: list[tuple[str, str]] = []
     scheduled: list[tuple[str, str, str, int | None]] = []
+    refreshed: list[str] = []
 
     class FakeTelegramClient:
         def __init__(self, settings) -> None:
@@ -74,7 +75,15 @@ def test_telegram_webhook_acknowledges_and_schedules_x_info(monkeypatch) -> None
     async def fake_dispatch(command, chat_id, requester_key, background_tasks, trigger_message_id=None, status_message_id=None):
         scheduled.append((command, chat_id, requester_key, status_message_id))
 
+    class FakeOpenRouterClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def refresh_free_text_models_if_due(self) -> None:
+            refreshed.append("ok")
+
     monkeypatch.setattr("app.main.TelegramClient", FakeTelegramClient)
+    monkeypatch.setattr("app.main.OpenRouterClient", FakeOpenRouterClient)
     monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
     monkeypatch.setattr("app.main.dispatch_telegram_command", fake_dispatch)
 
@@ -93,6 +102,7 @@ def test_telegram_webhook_acknowledges_and_schedules_x_info(monkeypatch) -> None
         ("321", "[x-info] Etapa 1/6: preparando o processamento."),
     ]
     assert scheduled == [("x-info", "321", "telegram_321", 500)]
+    assert refreshed == ["ok"]
 
 
 def test_telegram_webhook_handles_start_inline(monkeypatch) -> None:

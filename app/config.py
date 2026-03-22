@@ -42,6 +42,18 @@ class Settings(BaseSettings):
     openrouter_api_key: str
     openrouter_site_url: str | None = None
     openrouter_app_name: str = "trakt-sync"
+    openrouter_free_text_models: list[str] = Field(
+        default_factory=lambda: [
+            "openai/gpt-oss-120b:free",
+            "meta-llama/llama-3.3-70b-instruct:free",
+            "qwen/qwen3-next-80b-a3b-instruct:free",
+            "mistralai/mistral-small-3.1-24b-instruct:free",
+            "google/gemma-3-27b-it:free",
+            "openrouter/free",
+        ]
+    )
+    openrouter_free_models_refresh_interval_seconds: int = 21600
+    openrouter_free_models_cache_file: str = ".cache/openrouter_free_models.json"
     openrouter_vision_models: list[str] = Field(
         default_factory=lambda: [
             "mistralai/mistral-small-3.1-24b-instruct:free",

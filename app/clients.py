@@ -107,13 +107,14 @@ class TelegramClient:
     def _file_base_url(self) -> str:
         return f"https://api.telegram.org/file/bot{self.settings.telegram_bot_token}"
 
-    async def send_text(self, chat_id: str, text: str) -> int | None:
+    async def send_text(self, chat_id: str, text: str, *, parse_mode: str | None = None) -> int | None:
         payload: dict[str, Any] = {
             "chat_id": str(chat_id),
             "text": text,
         }
-        if self.settings.telegram_default_parse_mode:
-            payload["parse_mode"] = self.settings.telegram_default_parse_mode
+        resolved_parse_mode = parse_mode if parse_mode is not None else self.settings.telegram_default_parse_mode
+        if resolved_parse_mode:
+            payload["parse_mode"] = resolved_parse_mode
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
             response = await client.post("/sendMessage", json=payload)
             response.raise_for_status()
@@ -121,14 +122,15 @@ class TelegramClient:
             message_id = result.get("message_id")
             return int(message_id) if isinstance(message_id, int) else None
 
-    async def edit_text(self, chat_id: str, message_id: int, text: str) -> None:
+    async def edit_text(self, chat_id: str, message_id: int, text: str, *, parse_mode: str | None = None) -> None:
         payload: dict[str, Any] = {
             "chat_id": str(chat_id),
             "message_id": int(message_id),
             "text": text,
         }
-        if self.settings.telegram_default_parse_mode:
-            payload["parse_mode"] = self.settings.telegram_default_parse_mode
+        resolved_parse_mode = parse_mode if parse_mode is not None else self.settings.telegram_default_parse_mode
+        if resolved_parse_mode:
+            payload["parse_mode"] = resolved_parse_mode
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
             response = await client.post("/editMessageText", json=payload)
             response.raise_for_status()
@@ -216,6 +218,36 @@ class OpenRouterClient:
         if parsed.detected_title and parsed.confidence >= 0.75:
             return parsed
         raise VisionIdentificationError("Nao consegui identificar o titulo com confianca suficiente.", attempts)
+
+    async def generate_review_blurbs(self, enriched: EnrichedMedia) -> list[str]:
+        ratings_summary = ", ".join(f"{label}: {value}" for label, value in enriched.ratings.items()) or "sem ratings"
+        prompt = (
+            "Voce e um assistente que resume recepcao critica de filmes e series. "
+            "Com base apenas nos metadados fornecidos, gere exatamente 3 mini reviews em portugues do Brasil. "
+            "Cada review deve ter no maximo 240 caracteres, tom informativo e deixar claro quando a informacao e inferida. "
+            "Retorne JSON puro no formato {\"reviews\":[\"...\",\"...\",\"...\"]}.\n\n"
+            f"Titulo: {enriched.title}\n"
+            f"Ano: {enriched.year or 'desconhecido'}\n"
+            f"Tipo: {'serie' if enriched.media_type == 'series' else 'filme'}\n"
+            f"Resumo: {enriched.overview or 'sem resumo'}\n"
+            f"Generos: {', '.join(enriched.genres) or 'sem generos'}\n"
+            f"Ratings: {ratings_summary}\n"
+        )
+        payload = {
+            "model": self.settings.openrouter_emergency_router,
+            "messages": [{"role": "user", "content": prompt}],
+            "response_format": {"type": "json_object"},
+        }
+        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=45.0) as client:
+            response = await client.post("/chat/completions", headers=self._headers(), json=payload)
+            response.raise_for_status()
+            body = response.json()
+        message = (((body.get("choices") or [{}])[0]).get("message") or {}).get("content", "")
+        data = parse_json_response(message) if isinstance(message, str) else {}
+        reviews = data.get("reviews") if isinstance(data, dict) else []
+        if not isinstance(reviews, list):
+            return []
+        return [compact_text(str(review), 260) for review in reviews if str(review).strip()][:3]
 
     def _identify_title_from_ocr(self, image_bytes: bytes) -> VisionCandidate | None:
         if self._ocr_engine is None:

@@ -26,6 +26,7 @@ from app.utils import (
     encode_state,
     extract_message_from_evolution,
     extract_message_from_telegram,
+    normalize_requester_key,
     normalize_phone,
 )
 from app.worker import process_telegram_x_info, process_telegram_x_save, process_x_info, process_x_save
@@ -150,9 +151,9 @@ async def _handle_telegram_utility_command(
         await telegram.send_text(
             normalized.chat_jid,
             (
-                f"user_key: `{normalized.requester_phone}`\n"
-                f"user_id: `{normalized.provider_user_id or 'unknown'}`\n"
-                f"chat_id: `{normalized.chat_jid}`"
+                f"user_key: {normalized.requester_phone}\n"
+                f"user_id: {normalized.provider_user_id or 'unknown'}\n"
+                f"chat_id: {normalized.chat_jid}"
             ),
         )
         return {"status": "accepted", "command": command}
@@ -466,7 +467,7 @@ async def trakt_callback(
     settings: Annotated[Settings, Depends(settings_dep)],
 ) -> HTMLResponse:
     payload = decode_state(state, settings.trakt_client_secret)
-    phone_number = normalize_phone(payload["phone_number"])
+    phone_number = normalize_requester_key(payload["phone_number"])
     pipeline = PipelineService(settings)
     token_payload = await pipeline.trakt.exchange_code(code)
     async with SessionLocal() as db:

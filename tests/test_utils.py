@@ -6,11 +6,17 @@ from app.utils import (
     extract_message_from_evolution,
     extract_message_from_telegram,
     normalize_phone,
+    normalize_requester_key,
 )
 
 
 def test_normalize_phone_keeps_digits_only() -> None:
     assert normalize_phone("5511-99888-7766@s.whatsapp.net") == "5511998887766"
+
+
+def test_normalize_requester_key_preserves_telegram_key() -> None:
+    assert normalize_requester_key("telegram_321") == "telegram_321"
+    assert normalize_requester_key("5511-99888-7766@s.whatsapp.net") == "5511998887766"
 
 
 def test_encode_decode_state_roundtrip() -> None:

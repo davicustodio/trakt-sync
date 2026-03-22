@@ -176,7 +176,7 @@ async def test_telegram_send_text_returns_message_id(monkeypatch) -> None:
     assert calls == [
         (
             "/sendMessage",
-            {"chat_id": "321", "text": "teste", "parse_mode": "Markdown"},
+            {"chat_id": "321", "text": "teste"},
         )
     ]
 

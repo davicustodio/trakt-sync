@@ -26,6 +26,15 @@ def normalize_phone(value: str | None) -> str:
     return digits or "unknown"
 
 
+def normalize_requester_key(value: str | None) -> str:
+    if not value:
+        return "unknown"
+    text = str(value).strip()
+    if text.startswith(TELEGRAM_USER_KEY_PREFIX):
+        return text
+    return normalize_phone(text)
+
+
 def normalize_chat_jid(value: str | None) -> str:
     return value or "unknown@g.us"
 

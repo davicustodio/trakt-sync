@@ -243,7 +243,17 @@ class PipelineService:
 
     async def format_review_messages(self, enriched: EnrichedMedia) -> list[str]:
         messages: list[str] = []
-        for index, review in enumerate(enriched.reviews[:3]):
+        reviews = list(enriched.reviews[:3])
+        if not reviews:
+            reviews = await self.openrouter.generate_review_blurbs(enriched)
+        if not reviews:
+            reviews = [
+                "Review 1\nNao encontrei review textual publica para este titulo. A recepcao parece mista pelos ratings disponiveis.",
+                "Review 2\nOs dados de catalogo indicam uma resposta critica limitada. Use este resultado como referencia inicial, nao como consenso.",
+                "Review 3\nSe quiser, envie outra imagem ou contexto adicional para eu refinar a identificacao e a leitura critica do titulo.",
+            ]
+            return reviews
+        for index, review in enumerate(reviews[:3]):
             messages.append(f"Review {index + 1}\n{review}")
         return messages
 

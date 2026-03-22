@@ -62,6 +62,33 @@ async def test_format_review_messages_returns_three_separate_messages() -> None:
     ]
 
 
+@pytest.mark.asyncio
+async def test_format_review_messages_falls_back_to_openrouter_when_tmdb_has_no_reviews() -> None:
+    pipeline = PipelineService(build_settings())
+    enriched = types.SimpleNamespace(
+        title="2067",
+        year=2020,
+        media_type="movie",
+        overview="Ficcao cientifica distopica.",
+        genres=["Ficcao cientifica"],
+        ratings={"TMDb": "5.4/10"},
+        reviews=[],
+    )
+
+    async def fake_generate_review_blurbs(_enriched):
+        return ["Sintese 1", "Sintese 2", "Sintese 3"]
+
+    pipeline.openrouter.generate_review_blurbs = fake_generate_review_blurbs
+
+    messages = await pipeline.format_review_messages(enriched)
+
+    assert messages == [
+        "Review 1\nSintese 1",
+        "Review 2\nSintese 2",
+        "Review 3\nSintese 3",
+    ]
+
+
 def test_tmdb_client_detects_ambiguity() -> None:
     client = TMDbClient(build_settings())
 

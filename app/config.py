@@ -37,7 +37,7 @@ class Settings(BaseSettings):
     telegram_webhook_url: str | None = None
     telegram_enable_progress_messages: bool = True
     telegram_enable_chat_actions: bool = True
-    telegram_default_parse_mode: str = "Markdown"
+    telegram_default_parse_mode: str | None = None
 
     openrouter_api_key: str
     openrouter_site_url: str | None = None

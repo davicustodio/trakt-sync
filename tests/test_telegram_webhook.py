@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.main import app, db_dep, settings_dep
+from app.utils import encode_state
 
 
 async def fake_db_dep() -> AsyncIterator[object]:
@@ -138,3 +139,52 @@ def test_telegram_webhook_handles_start_inline(monkeypatch) -> None:
     assert sent == [
         "Bot ativo.\nEnvie uma foto com `x-info` na legenda ou envie a foto e depois `x-info`.\nUse `/trakt-connect` para ligar sua conta Trakt."
     ]
+
+
+def test_trakt_callback_preserves_telegram_requester_key(monkeypatch) -> None:
+    app.dependency_overrides[settings_dep] = lambda: build_settings()
+    received: list[str] = []
+
+    class FakeConnection:
+        access_token = "token"
+        trakt_username = None
+
+    class FakePipelineService:
+        def __init__(self, settings) -> None:
+            self.trakt = self
+
+        async def exchange_code(self, code: str):
+            return {"access_token": "token", "expires_in": 3600}
+
+        async def persist_trakt_callback(self, db, phone_number: str, token_payload: dict):
+            received.append(phone_number)
+            return FakeConnection()
+
+        async def get_profile(self, access_token: str):
+            return {"user": {"username": "davi"}}
+
+    class FakeSession:
+        async def commit(self) -> None:
+            return None
+
+    class DummyContextManager:
+        def __init__(self, value) -> None:
+            self.value = value
+
+        async def __aenter__(self):
+            return self.value
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+    monkeypatch.setattr("app.main.PipelineService", FakePipelineService)
+    monkeypatch.setattr("app.main.SessionLocal", lambda: DummyContextManager(FakeSession()))
+
+    state = encode_state({"phone_number": "telegram_321", "generated_at": "2026-03-22T00:00:00+00:00"}, "test")
+
+    with TestClient(app) as client:
+        response = client.get(f"/auth/trakt/callback?code=abc&state={state}")
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert received == ["telegram_321"]

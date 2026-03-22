@@ -187,6 +187,51 @@ async def _handle_telegram_utility_command(
     return {"status": "ignored", "reason": "unsupported-command"}
 
 
+async def _check_telegram_access(
+    normalized: NormalizedMessage,
+    settings: Settings,
+    db: AsyncSession,
+) -> bool:
+    if not settings.telegram_require_approval:
+        return True
+    result = await db.execute(select(PhoneProfile).where(PhoneProfile.phone_number == normalized.requester_phone))
+    profile = result.scalar_one_or_none()
+    if profile is None:
+        return False
+    first_name = normalized.raw_payload.get("message", {}).get("from", {}).get("first_name")
+    username = normalized.raw_payload.get("message", {}).get("from", {}).get("username")
+    display_name = first_name or (f"@{username}" if username else None)
+    should_commit = False
+    if display_name and getattr(profile, "display_name", None) != display_name:
+        profile.display_name = display_name
+        should_commit = True
+    if normalized.requester_phone in set(settings.telegram_auto_approved_user_keys):
+        if not profile.telegram_access_granted:
+            profile.telegram_access_granted = True
+            should_commit = True
+        if should_commit:
+            await db.commit()
+        return True
+    if should_commit:
+        await db.commit()
+    return bool(profile.telegram_access_granted)
+
+
+async def _handle_blocked_telegram_user(
+    normalized: NormalizedMessage,
+    settings: Settings,
+) -> dict[str, str]:
+    telegram = TelegramClient(settings)
+    await telegram.send_text(
+        normalized.chat_jid,
+        (
+            "Seu acesso ao bot ainda nao foi liberado.\n"
+            "Seu cadastro foi recebido e o administrador precisa aprovar seu usuario antes do uso."
+        ),
+    )
+    return {"status": "ignored", "reason": "telegram-access-pending"}
+
+
 async def handle_normalized_message(
     normalized: NormalizedMessage,
     settings: Settings,
@@ -207,6 +252,10 @@ async def handle_normalized_message(
         return {"status": "ignored", "reason": "duplicate-event"}
 
     command = canonical_command(normalized.text_body)
+    if normalized.channel == "telegram":
+        access_granted = await _check_telegram_access(normalized, settings, db)
+        if not access_granted:
+            return await _handle_blocked_telegram_user(normalized, settings)
     if normalized.channel == "telegram" and command in {"/start", "/help", "/whoami", "/trakt-connect", "/trakt-status"}:
         return await _handle_telegram_utility_command(normalized, settings, db)
     if command in {"x-info", "x-save"}:
@@ -410,6 +459,8 @@ async def trakt_admin(
                 "phone_number": profile.phone_number,
                 "display_name": profile.display_name,
                 "trakt_enabled": profile.trakt_enabled,
+                "telegram_access_granted": profile.telegram_access_granted,
+                "is_telegram_user": profile.phone_number.startswith("telegram_"),
                 "has_token": bool(connection and connection.access_token),
                 "connect_url": f"trakt/connect/{profile.phone_number}",
             }
@@ -422,6 +473,7 @@ async def trakt_admin(
             "redirect_uri": settings.computed_trakt_redirect_uri,
             "admin_secret": settings.admin_shared_secret or "",
             "register_url": "trakt/register",
+            "access_url": "telegram/access",
         },
     )
 
@@ -436,8 +488,27 @@ async def register_phone(
     display_name: Annotated[str | None, Form()] = None,
 ) -> RedirectResponse:
     service = MessageService(settings, db)
-    profile = await service.upsert_phone_profile(normalize_phone(phone_number))
+    profile = await service.upsert_phone_profile(normalize_requester_key(phone_number))
     profile.display_name = display_name
+    await db.commit()
+    target = "../trakt"
+    if settings.admin_shared_secret:
+        target += f"?token={settings.admin_shared_secret}"
+    return RedirectResponse(target, status_code=303)
+
+
+@app.post("/admin/telegram/access")
+async def update_telegram_access(
+    _: Annotated[None, Depends(require_admin)],
+    settings: Annotated[Settings, Depends(settings_dep)],
+    db: Annotated[AsyncSession, Depends(db_dep)],
+    phone_number: Annotated[str, Form()],
+    granted: Annotated[bool, Form()],
+) -> RedirectResponse:
+    normalized_phone = normalize_requester_key(phone_number)
+    service = MessageService(settings, db)
+    profile = await service.upsert_phone_profile(normalized_phone)
+    profile.telegram_access_granted = granted
     await db.commit()
     target = "../trakt"
     if settings.admin_shared_secret:

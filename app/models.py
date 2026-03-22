@@ -27,6 +27,7 @@ class PhoneProfile(TimestampMixin, Base):
     whatsapp_jid: Mapped[str | None] = mapped_column(String(255), unique=True, nullable=True)
     display_name: Mapped[str | None] = mapped_column(String(255), nullable=True)
     trakt_enabled: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    telegram_access_granted: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
 
     trakt_connection: Mapped["TraktConnection | None"] = relationship(back_populates="phone_profile", uselist=False)
 

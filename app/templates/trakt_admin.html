@@ -16,7 +16,7 @@
     </style>
   </head>
   <body>
-    <h1>Vincular Trakt por telefone</h1>
+    <h1>Usuarios e Trakt</h1>
     <p>Redirect URI configurada: <code>{{ redirect_uri }}</code></p>
 
     <h2>Cadastrar telefone</h2>
@@ -30,8 +30,9 @@
     <table>
       <thead>
         <tr>
-          <th>Telefone</th>
+          <th>Usuario</th>
           <th>Nome</th>
+          <th>Acesso Telegram</th>
           <th>Trakt</th>
           <th>Status</th>
         </tr>
@@ -42,11 +43,29 @@
           <td>{{ profile.phone_number }}</td>
           <td>{{ profile.display_name or "-" }}</td>
           <td>
+            {% if profile.is_telegram_user %}
+            <form method="post" action="{{ access_url }}{% if admin_secret %}?token={{ admin_secret }}{% endif %}">
+              <input type="hidden" name="phone_number" value="{{ profile.phone_number }}" />
+              <input type="hidden" name="granted" value="{{ 'false' if profile.telegram_access_granted else 'true' }}" />
+              <button type="submit">{{ 'Revogar' if profile.telegram_access_granted else 'Aprovar' }}</button>
+            </form>
+            {% else %}
+            -
+            {% endif %}
+          </td>
+          <td>
             <a class="button" href="{{ profile.connect_url }}{% if admin_secret %}?token={{ admin_secret }}{% endif %}">
               Conectar
             </a>
           </td>
-          <td>{% if profile.has_token %}Vinculado{% else %}Pendente{% endif %}</td>
+          <td>
+            {% if profile.is_telegram_user %}
+              {% if profile.telegram_access_granted %}Liberado{% else %}Pendente aprovacao{% endif %}
+              {% if profile.has_token %} / Trakt vinculado{% endif %}
+            {% else %}
+              {% if profile.has_token %}Vinculado{% else %}Pendente{% endif %}
+            {% endif %}
+          </td>
         </tr>
         {% endfor %}
       </tbody>

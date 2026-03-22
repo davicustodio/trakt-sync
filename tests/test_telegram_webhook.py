@@ -8,6 +8,9 @@ class FakeDB:
     async def commit(self) -> None:
         return None
 
+    async def execute(self, statement):
+        return type("FakeResult", (), {"scalar_one_or_none": lambda self: None})()
+
 from fastapi.testclient import TestClient
 
 from app.config import Settings
@@ -27,6 +30,7 @@ def build_settings() -> Settings:
         evolution_owner_phone="5519988343888",
         telegram_bot_token="telegram-token",
         telegram_webhook_secret="telegram-secret",
+        telegram_require_approval=False,
         openrouter_api_key="test",
         tmdb_api_token="test",
         omdb_api_key="test",
@@ -190,6 +194,65 @@ def test_telegram_webhook_handles_trakt_connect_inline(monkeypatch) -> None:
     ]
 
 
+def test_telegram_webhook_blocks_unapproved_user_when_approval_required(monkeypatch) -> None:
+    settings = build_settings()
+    settings.telegram_require_approval = True
+    app.dependency_overrides[settings_dep] = lambda: settings
+
+    class BlockingDB:
+        async def commit(self) -> None:
+            return None
+
+        async def execute(self, statement):
+            profile = type("Profile", (), {"telegram_access_granted": False})()
+            return type("FakeResult", (), {"scalar_one_or_none": lambda self: profile})()
+
+    async def blocking_db_dep() -> AsyncIterator[object]:
+        yield BlockingDB()
+
+    app.dependency_overrides[db_dep] = blocking_db_dep
+    sent: list[str] = []
+
+    class FakeTelegramClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> int | None:
+            sent.append(text)
+            return 1
+
+    async def fake_persist(self, normalized):
+        from app.services import PersistMessageResult
+        from types import SimpleNamespace
+
+        return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
+
+    class FakeOpenRouterClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def refresh_free_text_models_if_due(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.main.TelegramClient", FakeTelegramClient)
+    monkeypatch.setattr("app.main.OpenRouterClient", FakeOpenRouterClient)
+    monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
+            json=build_payload(text="/start"),
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"status": "ignored", "reason": "telegram-access-pending"}
+    assert sent == [
+        "Seu acesso ao bot ainda nao foi liberado.\nSeu cadastro foi recebido e o administrador precisa aprovar seu usuario antes do uso."
+    ]
+
+
 def test_trakt_callback_preserves_telegram_requester_key(monkeypatch) -> None:
     app.dependency_overrides[settings_dep] = lambda: build_settings()
     received: list[str] = []
@@ -252,3 +315,43 @@ def test_admin_trakt_connect_preserves_telegram_requester_key(monkeypatch) -> No
     state = parse_qs(urlparse(location).query)["state"][0]
     payload = decode_state(state, "test")
     assert payload["phone_number"] == "telegram_321"
+
+
+def test_admin_telegram_access_preserves_telegram_requester_key(monkeypatch) -> None:
+    settings = build_settings()
+    settings.admin_shared_secret = "test"
+    app.dependency_overrides[settings_dep] = lambda: settings
+
+    saved: list[tuple[str, bool]] = []
+
+    class FakeProfile:
+        telegram_access_granted = False
+
+    class FakeMessageService:
+        def __init__(self, settings, db) -> None:
+            pass
+
+        async def upsert_phone_profile(self, phone_number: str, whatsapp_jid: str | None = None):
+            saved.append((phone_number, False))
+            return FakeProfile()
+
+    class FakeSession:
+        async def commit(self) -> None:
+            saved[-1] = (saved[-1][0], True)
+
+    async def fake_db_dep() -> AsyncIterator[object]:
+        yield FakeSession()
+
+    app.dependency_overrides[db_dep] = fake_db_dep
+    monkeypatch.setattr("app.main.MessageService", FakeMessageService)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/admin/telegram/access?token=test",
+            data={"phone_number": "telegram_321", "granted": "true"},
+            follow_redirects=False,
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 303
+    assert saved == [("telegram_321", True)]

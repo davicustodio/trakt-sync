@@ -38,6 +38,8 @@ class Settings(BaseSettings):
     telegram_enable_progress_messages: bool = True
     telegram_enable_chat_actions: bool = True
     telegram_default_parse_mode: str | None = None
+    telegram_require_approval: bool = False
+    telegram_auto_approved_user_keys: list[str] = Field(default_factory=list)
 
     openrouter_api_key: str
     openrouter_site_url: str | None = None

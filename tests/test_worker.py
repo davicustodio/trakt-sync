@@ -333,7 +333,7 @@ async def test_process_x_info_confirmation_reuses_user_selection_and_persists(mo
         def __init__(self, settings) -> None:
             self.evolution = FakeEvolution()
 
-        async def enrich_from_user_confirmation(self, selection: str, pending):
+        async def enrich_from_user_confirmation(self, selection: str, pending, source_message=None):
             assert selection == "1"
             return SimpleNamespace(
                 title="The Gift",

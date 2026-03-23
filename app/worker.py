@@ -120,10 +120,10 @@ async def process_x_info_confirmation(_: dict, chat_jid: str, requester_phone: s
             await pipeline.evolution.send_text(chat_jid, "Nao ha nenhuma identificacao pendente para confirmar.")
             return
         try:
-            enriched = await pipeline.enrich_from_user_confirmation(selection, pending)
             source_message = None
             if pending.image_message_id:
                 source_message = await service.get_message_by_id(pending.image_message_id)
+            enriched = await pipeline.enrich_from_user_confirmation(selection, pending, source_message=source_message)
             if source_message is not None:
                 identified = await service.save_identified_media(source_message, enriched)
             else:
@@ -323,10 +323,10 @@ async def process_telegram_x_info_confirmation(_: dict, chat_id: str, requester_
                 await pipeline.telegram.send_text(chat_id, "Nao ha nenhuma identificacao pendente para confirmar.")
             return
         try:
-            enriched = await pipeline.enrich_from_user_confirmation(selection, pending)
             source_message = None
             if pending.image_message_id:
                 source_message = await service.get_message_by_id(pending.image_message_id)
+            enriched = await pipeline.enrich_from_user_confirmation(selection, pending, source_message=source_message)
             if source_message is not None:
                 identified = await service.save_identified_media(source_message, enriched)
             else:

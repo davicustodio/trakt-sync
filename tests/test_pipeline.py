@@ -8,6 +8,7 @@ from app.clients import TMDbClient
 from app.config import Settings
 from app.exceptions import AmbiguousTitleError
 from app.models import IdentifiedMedia
+from app.schemas import PendingIdentificationState
 from app.services import PipelineService
 from fastapi import HTTPException
 
@@ -178,6 +179,71 @@ def test_build_watchlist_item_reuses_identified_ids() -> None:
     assert enriched.title == "Pulp Fiction"
     assert enriched.tmdb_id == 329
     assert enriched.imdb_id == "tt0110912"
+
+
+@pytest.mark.asyncio
+async def test_enrich_from_user_confirmation_uses_image_with_manual_hint_when_available() -> None:
+    pipeline = PipelineService(build_settings())
+    pending = PendingIdentificationState(mode="manual-input", channel="telegram", image_message_id=55)
+    source_message = types.SimpleNamespace(
+        provider_message_id="msg-55",
+        media_url="file-55",
+        media_file_id="file-55",
+        message_type="image",
+    )
+
+    async def fake_fetch_media_bytes(channel: str, provider_message_id: str, media_url: str | None = None, media_file_id: str | None = None):
+        assert channel == "telegram"
+        assert provider_message_id == "msg-55"
+        return b"image"
+
+    async def fake_identify_title_with_hint(image: bytes, hint: str):
+        assert hint == "o titulo e beast"
+        return types.SimpleNamespace(
+            detected_title="Beast",
+            media_type="movie",
+            year=2017,
+            confidence=0.92,
+            alt_titles=[],
+            visible_text=["Beast (2017)"],
+        )
+
+    async def fake_tmdb_search(candidate):
+        return types.SimpleNamespace(
+            title="Fera",
+            original_title="Beast",
+            localized_title="Fera",
+            media_type="movie",
+            year=2017,
+            imdb_id="tt5628302",
+            tmdb_id=466272,
+            release_date="2017-09-09",
+            overview="Thriller psicologico.",
+            genres=["Thriller"],
+            ratings={"TMDb": "6.8/10"},
+            providers=[],
+            reviews=[],
+            confidence=0.92,
+            payload={"source": "tmdb"},
+        )
+
+    async def passthrough(enriched):
+        return enriched
+
+    pipeline.fetch_media_bytes = fake_fetch_media_bytes
+    async def fake_refine(selection, options):
+        return types.SimpleNamespace(detected_title=None)
+
+    pipeline.openrouter.refine_title_from_user_feedback = fake_refine
+    pipeline.openrouter.identify_title_with_hint = fake_identify_title_with_hint
+    pipeline.tmdb.search_and_enrich = fake_tmdb_search
+    pipeline.omdb.attach_ratings = passthrough
+    pipeline.trakt.attach_public_ratings = passthrough
+
+    enriched = await pipeline.enrich_from_user_confirmation("o titulo e beast", pending, source_message=source_message)
+
+    assert enriched.original_title == "Beast"
+    assert enriched.year == 2017
 
 
 @pytest.mark.asyncio

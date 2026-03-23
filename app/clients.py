@@ -359,6 +359,11 @@ class OpenRouterClient:
                         return parsed
                     attempts.append("free-candidate-rejected-by-visible-text")
 
+                title_only_candidate, title_only_attempts = await self._query_title_only_candidate(image_bytes, ocr_hint)
+                attempts.extend(title_only_attempts)
+                if title_only_candidate.detected_title and self._candidate_matches_visible_text(title_only_candidate, ocr_hint):
+                    return title_only_candidate
+
                 assertive_candidate, assertive_attempts = await self._query_assertive_text_candidate(image_bytes, ocr_hint)
                 attempts.extend(assertive_attempts)
                 if assertive_candidate.detected_title and assertive_candidate.confidence >= 0.7:
@@ -390,6 +395,26 @@ class OpenRouterClient:
         except TimeoutError:
             attempts.append("vision-time-budget-exceeded")
         raise VisionIdentificationError("Nao consegui identificar o titulo com confianca suficiente.", attempts)
+
+    async def identify_title_with_hint(self, image_bytes: bytes, user_hint: str) -> VisionCandidate:
+        cleaned_hint = " ".join(str(user_hint).split()).strip()
+        if not cleaned_hint:
+            return VisionCandidate()
+        ocr_hint = self._identify_title_from_ocr(image_bytes)
+        preferred_models = list(dict.fromkeys(self.settings.openrouter_paid_vision_models))
+        if not preferred_models:
+            return VisionCandidate()
+        hint_text = ", ".join((ocr_hint.visible_text if ocr_hint else [])[:8]) if ocr_hint and ocr_hint.visible_text else "sem OCR util"
+        prompt = (
+            "Voce esta vendo a imagem de um filme ou serie e recebeu uma dica do usuario sobre o titulo. "
+            "Use a dica do usuario, o poster, os atores, o design e qualquer texto visivel para descobrir o TITULO ORIGINAL exato. "
+            "Se souber o ano, responda no formato `Titulo (Ano)`. "
+            "Se nao souber o ano, responda apenas com o titulo original. "
+            "Nao explique nada, nao use JSON, responda em uma unica linha.\n\n"
+            f"Dica do usuario: {cleaned_hint}\n"
+            f"Texto OCR visivel: {hint_text}\n"
+        )
+        return await self._query_title_only_text(image_bytes, prompt, preferred_models)
 
     async def generate_review_blurbs(self, enriched: EnrichedMedia) -> list[str]:
         ratings_summary = ", ".join(f"{label}: {value}" for label, value in enriched.ratings.items()) or "sem ratings"
@@ -860,6 +885,102 @@ class OpenRouterClient:
             if candidate.detected_title:
                 return candidate, attempts
         return VisionCandidate(), attempts
+
+    async def _query_title_only_candidate(
+        self,
+        image_bytes: bytes,
+        ocr_hint: VisionCandidate | None,
+    ) -> tuple[VisionCandidate, list[str]]:
+        preferred_models = list(dict.fromkeys(self.settings.openrouter_paid_vision_models))
+        if not preferred_models:
+            return VisionCandidate(), []
+        hint_text = ", ".join((ocr_hint.visible_text if ocr_hint else [])[:8]) if ocr_hint and ocr_hint.visible_text else "sem OCR util"
+        prompt = (
+            "Identifique o titulo ORIGINAL do filme ou da serie mostrada nesta imagem. "
+            "Priorize o poster, rostos, composicao visual e qualquer texto visivel. "
+            "Se souber o ano, responda no formato `Titulo (Ano)`. "
+            "Se nao souber o ano, responda apenas com o titulo original. "
+            "Se houver mais de uma possibilidade, liste no maximo 3 opcoes, uma por linha, da mais provavel para a menos provavel. "
+            "Nao explique nada, nao use JSON.\n\n"
+            f"Texto OCR visivel: {hint_text}\n"
+        )
+        candidate = await self._query_title_only_text(image_bytes, prompt, preferred_models)
+        attempts = [f"title-only::{entry}" for entry in (candidate.visible_text or []) if str(entry).startswith(("variant=", "model="))]
+        return candidate, attempts
+
+    async def _query_title_only_text(
+        self,
+        image_bytes: bytes,
+        prompt: str,
+        models: list[str],
+    ) -> VisionCandidate:
+        async with httpx.AsyncClient(
+            base_url="https://openrouter.ai/api/v1",
+            timeout=self.settings.openrouter_vision_request_timeout_seconds,
+        ) as client:
+            for model in models:
+                for variant_name, variant_bytes in self._build_llm_vision_variants(image_bytes):
+                    payload = {
+                        "model": model,
+                        "messages": [
+                            {
+                                "role": "user",
+                                "content": [
+                                    {"type": "text", "text": prompt},
+                                    {
+                                        "type": "image_url",
+                                        "image_url": {"url": f"data:image/jpeg;base64,{base64.b64encode(variant_bytes).decode('ascii')}"},
+                                    },
+                                ],
+                            }
+                        ],
+                    }
+                    try:
+                        response = await client.post("/chat/completions", headers=self._headers(), json=payload)
+                        response.raise_for_status()
+                        data = response.json()
+                        content = (((data.get("choices") or [{}])[0]).get("message") or {}).get("content", "")
+                        candidate = self._parse_plain_text_title_candidate(content)
+                        if candidate.detected_title:
+                            candidate.visible_text = [*(candidate.visible_text or []), f"variant={variant_name}", f"model={model}"]
+                            return candidate
+                    except Exception:
+                        continue
+        return VisionCandidate()
+
+    def _parse_plain_text_title_candidate(self, content: Any) -> VisionCandidate:
+        if isinstance(content, list):
+            text = " ".join(str(part.get("text") or "") if isinstance(part, dict) else str(part) for part in content)
+        else:
+            text = str(content or "")
+        lines = [line.strip(" -\t") for line in str(text).splitlines() if line.strip()]
+        if not lines:
+            return VisionCandidate()
+        best_line = lines[0]
+        parsed = self._parse_title_year_line(best_line)
+        if parsed is None:
+            cleaned = " ".join(best_line.split()).strip(" -")
+            if len(cleaned) < 2:
+                return VisionCandidate()
+            return VisionCandidate(detected_title=cleaned, confidence=0.88, alt_titles=lines[1:3], visible_text=lines[:3])
+        return VisionCandidate(
+            detected_title=parsed["title"],
+            year=parsed.get("year"),
+            confidence=0.9,
+            alt_titles=lines[1:3],
+            visible_text=lines[:3],
+        )
+
+    def _parse_title_year_line(self, text: str) -> dict[str, Any] | None:
+        cleaned = " ".join(str(text).split()).strip()
+        match = re.match(r"^(?P<title>.+?)(?:\s*\((?P<year>\d{4})\))?$", cleaned)
+        if not match:
+            return None
+        title = match.group("title").strip(" -")
+        if not title:
+            return None
+        year = int(match.group("year")) if match.group("year") else None
+        return {"title": title, "year": year}
 
     async def _query_assertive_text_candidate(
         self,

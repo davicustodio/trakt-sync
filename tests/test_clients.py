@@ -654,6 +654,15 @@ async def test_identify_title_rejects_free_candidate_that_conflicts_with_visible
     assert candidate.confidence == 0.91
 
 
+def test_parse_plain_text_title_candidate_accepts_chatgpt_like_answer() -> None:
+    client = OpenRouterClient(build_settings())
+
+    candidate = client._parse_plain_text_title_candidate("Beast (2017)")
+
+    assert candidate.detected_title == "Beast"
+    assert candidate.year == 2017
+
+
 @pytest.mark.asyncio
 async def test_refine_title_from_user_feedback_uses_llm_result(monkeypatch) -> None:
     client = OpenRouterClient(build_settings())

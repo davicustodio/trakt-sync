@@ -289,6 +289,7 @@ class PipelineService:
         self,
         selection: str,
         pending: PendingIdentificationState,
+        source_message: Any | None = None,
     ) -> EnrichedMedia:
         refined = await self.openrouter.refine_title_from_user_feedback(selection, pending.options)
         option = self._match_pending_option(selection, pending.options)
@@ -311,14 +312,41 @@ class PipelineService:
                 visible_text=[f"user_selection={selection.strip()}"],
             )
         else:
-            parsed = self._parse_user_title_hint(selection)
-            candidate = VisionCandidate(
-                detected_title=parsed["title"],
-                media_type=parsed["media_type"],
-                year=parsed.get("year"),
-                confidence=0.95,
-                visible_text=[f"user_hint={selection.strip()}"],
-            )
+            if source_message is not None and getattr(source_message, "message_type", None) == "image":
+                image = await self.fetch_media_bytes(
+                    pending.channel,
+                    getattr(source_message, "provider_message_id", ""),
+                    getattr(source_message, "media_url", None),
+                    getattr(source_message, "media_file_id", None),
+                )
+                hinted = await self.openrouter.identify_title_with_hint(image, selection)
+                if hinted.detected_title:
+                    candidate = VisionCandidate(
+                        detected_title=hinted.detected_title,
+                        media_type=hinted.media_type,
+                        year=hinted.year,
+                        confidence=max(hinted.confidence, 0.96),
+                        alt_titles=hinted.alt_titles,
+                        visible_text=[f"user_hint={selection.strip()}", *(hinted.visible_text or [])],
+                    )
+                else:
+                    parsed = self._parse_user_title_hint(selection)
+                    candidate = VisionCandidate(
+                        detected_title=parsed["title"],
+                        media_type=parsed["media_type"],
+                        year=parsed.get("year"),
+                        confidence=0.95,
+                        visible_text=[f"user_hint={selection.strip()}"],
+                    )
+            else:
+                parsed = self._parse_user_title_hint(selection)
+                candidate = VisionCandidate(
+                    detected_title=parsed["title"],
+                    media_type=parsed["media_type"],
+                    year=parsed.get("year"),
+                    confidence=0.95,
+                    visible_text=[f"user_hint={selection.strip()}"],
+                )
         enriched = await self.tmdb.search_and_enrich(candidate)
         enriched = await self.omdb.attach_ratings(enriched)
         return await self.trakt.attach_public_ratings(enriched)
@@ -486,10 +514,16 @@ class PipelineService:
         }
 
     def _parse_user_title_hint(self, selection: str) -> dict[str, Any]:
-        parsed = self._parse_title_pattern(selection)
+        cleaned_selection = re.sub(
+            r"^(?:o\s+t[ií]tulo\s+[ée]\s+|o\s+filme\s+[ée]\s+|a\s+s[ée]rie\s+[ée]\s+|filme\s+[ée]\s+|s[ée]rie\s+[ée]\s+|chama(?:-se)?\s+)",
+            "",
+            " ".join(selection.split()).strip(),
+            flags=re.IGNORECASE,
+        ).strip(" -:.")
+        parsed = self._parse_title_pattern(cleaned_selection)
         if parsed is not None:
             return parsed
-        title = " ".join(selection.split()).strip(" -")
+        title = cleaned_selection
         if len(title) < 2:
             raise HTTPException(status_code=400, detail="Titulo manual invalido.")
         return {"title": title, "year": None, "media_type": "unknown"}

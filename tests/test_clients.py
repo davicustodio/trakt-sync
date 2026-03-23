@@ -1003,6 +1003,75 @@ async def test_tmdb_prefers_unique_exact_title_and_year_match(monkeypatch) -> No
     assert enriched.title == "Busca Implacável"
 
 
+@pytest.mark.asyncio
+async def test_tmdb_preserves_full_overview_without_truncation(monkeypatch) -> None:
+    full_overview = (
+        "Primeira frase longa sobre a jornada do protagonista e o conflito central. "
+        "Segunda frase expandindo os riscos, as relacoes e o contexto historico. "
+        "Terceira frase detalhando as consequencias dramaticas e a tensao crescente."
+    )
+
+    class FakeResponse:
+        def __init__(self, payload: dict) -> None:
+            self.payload = payload
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return self.payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, endpoint: str, headers: dict[str, str], params: dict[str, str]) -> FakeResponse:
+            if endpoint == "/search/multi":
+                return FakeResponse(
+                    {
+                        "results": [
+                            {
+                                "id": 514921,
+                                "media_type": "movie",
+                                "title": "Os Aeronautas",
+                                "original_title": "The Aeronauts",
+                                "release_date": "2019-12-20",
+                                "popularity": 6.0,
+                            }
+                        ]
+                    }
+                )
+            return FakeResponse(
+                {
+                    "id": 514921,
+                    "title": "Os Aeronautas",
+                    "original_title": "The Aeronauts",
+                    "release_date": "2019-12-20",
+                    "overview": full_overview,
+                    "genres": [{"name": "Drama"}],
+                    "vote_average": 6.6,
+                    "external_ids": {"imdb_id": "tt6141246"},
+                    "reviews": {"results": []},
+                    "watch/providers": {"results": {"BR": {}}},
+                }
+            )
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    client = TMDbClient(build_settings())
+    enriched = await client.search_and_enrich(
+        VisionCandidate(detected_title="The Aeronauts", media_type="movie", year=2019, confidence=0.99)
+    )
+
+    assert enriched.overview == full_overview
+
+
 def test_tmdb_select_best_match_prefers_exact_year_when_same_original_title() -> None:
     client = TMDbClient(build_settings())
     candidate = VisionCandidate(detected_title="The Aeronauts", media_type="movie", year=2019, confidence=0.99)

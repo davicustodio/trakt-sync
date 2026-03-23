@@ -587,6 +587,18 @@ class OpenRouterClient:
                 sharpened = high_contrast.filter(ImageFilter.SHARPEN)
                 variants.append(("grayscale-contrast", self._encode_image_variant(sharpened)))
 
+                top_title_crop = image.crop((int(width * 0.08), 0, int(width * 0.92), int(height * 0.34)))
+                top_title_gray = ImageOps.autocontrast(ImageOps.grayscale(top_title_crop))
+                top_title_large = top_title_gray.resize((max(top_title_crop.width * 3, 1), max(top_title_crop.height * 3, 1)))
+                top_title_sharp = ImageEnhance.Contrast(top_title_large).enhance(3.2).filter(ImageFilter.SHARPEN)
+                variants.append(("top-title-crop", self._encode_image_variant(top_title_sharp)))
+
+                metadata_crop = image.crop((int(width * 0.16), int(height * 0.08), int(width * 0.86), int(height * 0.26)))
+                metadata_gray = ImageOps.autocontrast(ImageOps.grayscale(metadata_crop))
+                metadata_large = metadata_gray.resize((max(metadata_crop.width * 4, 1), max(metadata_crop.height * 4, 1)))
+                metadata_sharp = ImageEnhance.Contrast(metadata_large).enhance(3.4).filter(ImageFilter.SHARPEN)
+                variants.append(("metadata-crop", self._encode_image_variant(metadata_sharp)))
+
                 lower_crop = image.crop((0, max(int(height * 0.58), 0), width, height))
                 lower_gray = ImageOps.autocontrast(ImageOps.grayscale(lower_crop))
                 lower_large = lower_gray.resize((max(lower_crop.width * 2, 1), max(lower_crop.height * 2, 1)))

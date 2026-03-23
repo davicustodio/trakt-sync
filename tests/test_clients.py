@@ -306,6 +306,26 @@ def test_extract_explicit_title_from_lines_prefers_original_title_label() -> Non
     assert title == "The Aeronauts"
 
 
+def test_identify_title_from_ocr_uses_explicit_original_title_from_variant(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+    monkeypatch.setattr(client, "_build_ocr_variants", lambda image_bytes: [("metadata-crop", b"variant")])
+    monkeypatch.setattr(
+        client,
+        "_run_ocr",
+        lambda image_bytes: [
+            {"text": "Os Aeronautas", "bbox": [], "score": 0.9},
+            {"text": "Titulo original: The Aeronauts", "bbox": [], "score": 0.98},
+            {"text": "2019 12 1 h 40 min", "bbox": [], "score": 0.9},
+        ],
+    )
+
+    candidate = client._identify_title_from_ocr(b"fake-image")
+
+    assert candidate is not None
+    assert candidate.detected_title == "The Aeronauts"
+    assert candidate.confidence == 0.99
+
+
 @pytest.mark.asyncio
 async def test_tmdb_review_client_filters_transcript_like_reviews(monkeypatch) -> None:
     payload = {

@@ -96,7 +96,7 @@ async def test_format_review_messages_reports_missing_reviews_when_tmdb_has_no_r
 
     messages = await pipeline.format_review_messages(enriched)
 
-    assert messages == ["Reviews\nNao encontrei reviews publicas integrais disponiveis na API oficial do TMDb para este titulo."]
+    assert messages == ["Reviews\nNao encontrei reviews publicas integrais disponiveis via Trakt para este titulo."]
 
 
 @pytest.mark.asyncio
@@ -215,11 +215,15 @@ async def test_enrich_from_image_falls_back_to_omdb_when_tmdb_has_no_match() -> 
     async def fake_attach_ratings(enriched):
         return enriched
 
+    async def fake_attach_public_ratings(enriched):
+        return enriched
+
     pipeline.fetch_media_bytes = fake_fetch_media_bytes
     pipeline.openrouter.identify_title = fake_identify_title
     pipeline.tmdb.search_and_enrich = fake_tmdb_search
     pipeline.omdb.search_and_enrich = fake_omdb_search
     pipeline.omdb.attach_ratings = fake_attach_ratings
+    pipeline.trakt.attach_public_ratings = fake_attach_public_ratings
 
     enriched = await pipeline.enrich_from_image("msg-1")
 

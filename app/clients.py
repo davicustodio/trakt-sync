@@ -453,9 +453,11 @@ class OpenRouterClient:
 
             explicit_title = self._extract_explicit_title_from_lines(lines)
             if explicit_title:
+                extracted_year = self._extract_year_from_lines(lines)
                 return VisionCandidate(
                     detected_title=explicit_title,
                     media_type="unknown",
+                    year=extracted_year,
                     confidence=0.99,
                     visible_text=[*lines, f"ocr_variant={variant_name}"],
                 )
@@ -476,17 +478,21 @@ class OpenRouterClient:
                     )
             title = self._guess_title_line(entries)
             if title:
+                extracted_year = self._extract_year_from_lines(lines)
                 return VisionCandidate(
                     detected_title=title,
                     media_type="unknown",
+                    year=extracted_year,
                     confidence=0.9,
                     visible_text=[*lines, f"ocr_variant={variant_name}"],
                 )
             contextual_title = self._extract_title_from_context_lines(lines)
             if contextual_title:
+                extracted_year = self._extract_year_from_lines(lines)
                 return VisionCandidate(
                     detected_title=contextual_title,
                     media_type="unknown",
+                    year=extracted_year,
                     confidence=0.84,
                     visible_text=[*lines, f"ocr_variant={variant_name}"],
                 )
@@ -532,6 +538,14 @@ class OpenRouterClient:
                 title = match.group("title").strip(" -")
                 if title:
                     return title
+        return None
+
+    def _extract_year_from_lines(self, lines: list[str]) -> int | None:
+        for raw_line in lines:
+            for match in re.finditer(r"\b(19\d{2}|20\d{2})\b", str(raw_line)):
+                year = int(match.group(1))
+                if 1900 <= year <= 2099:
+                    return year
         return None
 
     def _candidate_matches_visible_text(
@@ -691,6 +705,12 @@ class OpenRouterClient:
             "COMENTARIOS",
             "COMENTÁRIOS",
             "FINAL DE SEMANA",
+            "UMA INSPIRACAO BRILHANTE",
+            "VERDADEIRA ESTRELA",
+            "DIVERTIDA",
+            "EMOCIONANTE",
+            "INSPIRACAO",
+            "BRILHANTE",
         }
         best_line: str | None = None
         best_score = 0.0
@@ -732,7 +752,10 @@ class OpenRouterClient:
             score += uppercase_ratio
             score += 0.2 if len(words) in {2, 3} else 0.0
             score += 0.25 if 180 <= y_center <= 780 else 0.0
+            score -= 0.45 if y_center <= 150 else 0.0
             score -= 0.35 if y_center >= 900 else 0.0
+            if len(words) == 2 and cleaned.istitle() and y_center <= 180:
+                score -= 0.35
             score += min(len(cleaned) / 20, 0.4)
             if score <= best_score:
                 continue
@@ -1305,15 +1328,125 @@ class TMDbReviewClient:
 class ReviewSourceClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.tmdb = TMDbReviewClient(settings)
+        self.trakt = TraktReviewClient(settings)
 
     async def fetch_reviews(self, enriched: EnrichedMedia) -> list[str]:
-        return await self.tmdb.fetch_reviews(enriched)
+        return await self.trakt.fetch_reviews(enriched)
+
+
+class TraktReviewClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "trakt-api-version": "2",
+            "trakt-api-key": self.settings.trakt_client_id,
+        }
+
+    async def fetch_reviews(self, enriched: EnrichedMedia) -> list[str]:
+        trakt_id = await self._resolve_trakt_id(enriched)
+        if not trakt_id:
+            return []
+        resource = "shows" if enriched.media_type == "series" else "movies"
+        path = f"/{resource}/{trakt_id}/comments/newest"
+        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+            response = await client.get(path, headers=self._headers(), params={"limit": 20, "extended": "full"})
+            response.raise_for_status()
+            payload = response.json()
+        ranked: list[tuple[tuple[int, int, int, int], str]] = []
+        for item in payload if isinstance(payload, list) else []:
+            comment = " ".join(str(item.get("comment") or "").split())
+            if not comment:
+                continue
+            if self._looks_toxic_or_low_quality(comment):
+                continue
+            likes = int(item.get("likes") or 0)
+            replies = int(item.get("replies") or 0)
+            is_review = 1 if bool(item.get("review")) else 0
+            user_rating = item.get("user_rating")
+            rating = int(user_rating) if isinstance(user_rating, int) else -1
+            ranked.append(((is_review, likes + replies, rating, len(comment)), comment))
+        ranked.sort(key=lambda item: item[0], reverse=True)
+        reviews: list[str] = []
+        for _, comment in ranked:
+            if comment not in reviews:
+                reviews.append(comment[:6000])
+            if len(reviews) == 3:
+                break
+        return reviews
+
+    async def _resolve_trakt_id(self, enriched: EnrichedMedia) -> int | None:
+        if enriched.payload and isinstance(enriched.payload, dict):
+            ids = ((enriched.payload.get("ids") or {}) if isinstance(enriched.payload.get("ids"), dict) else {})
+            trakt_id = ids.get("trakt")
+            if isinstance(trakt_id, int):
+                return trakt_id
+        query = enriched.original_title or enriched.title
+        if not query:
+            return None
+        resource = "show" if enriched.media_type == "series" else "movie"
+        params: dict[str, Any] = {"query": query, "extended": "full"}
+        if enriched.year:
+            params["years"] = enriched.year
+        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+            response = await client.get(f"/search/{resource}", headers=self._headers(), params=params)
+            response.raise_for_status()
+            payload = response.json()
+        best_match = None
+        best_score = -1.0
+        for item in payload if isinstance(payload, list) else []:
+            node = item.get(resource) or {}
+            ids = node.get("ids") or {}
+            trakt_id = ids.get("trakt")
+            if not isinstance(trakt_id, int):
+                continue
+            score = 0.0
+            node_title = str(node.get("title") or "").strip().casefold()
+            original_title = str(node.get("original_title") or "").strip().casefold()
+            query_title = str(query).strip().casefold()
+            if query_title and query_title in {node_title, original_title}:
+                score += 2.0
+            elif query_title and (query_title in node_title or query_title in original_title):
+                score += 1.0
+            node_year = node.get("year")
+            if enriched.year and node_year == enriched.year:
+                score += 2.0
+            score += float(item.get("score") or 0)
+            if score > best_score:
+                best_score = score
+                best_match = trakt_id
+        return best_match
+
+    def _looks_toxic_or_low_quality(self, text: str) -> bool:
+        lowered = text.casefold()
+        if len(text) < 180:
+            return True
+        blocked = {
+            "cum on your face",
+            "cuckold",
+            "sissy",
+            "their place is in the kitchen",
+            "man up, dude",
+        }
+        if any(token in lowered for token in blocked):
+            return True
+        if re.search(r"\b(fuck|bitch|slut|retard)\b", lowered):
+            return True
+        return False
 
 
 class TraktClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
+
+    def _public_headers(self) -> dict[str, str]:
+        return {
+            "Content-Type": "application/json",
+            "trakt-api-version": "2",
+            "trakt-api-key": self.settings.trakt_client_id,
+        }
 
     async def exchange_code(self, code: str) -> dict[str, Any]:
         payload = {
@@ -1373,6 +1506,52 @@ class TraktClient:
         async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
             response = await client.post("/sync/watchlist", headers=self._headers(access_token), json=payload)
             response.raise_for_status()
+
+    async def attach_public_ratings(self, enriched: EnrichedMedia) -> EnrichedMedia:
+        query = enriched.original_title or enriched.title
+        if not query:
+            return enriched
+        resource = "show" if enriched.media_type == "series" else "movie"
+        params: dict[str, Any] = {"query": query, "extended": "full"}
+        if enriched.year:
+            params["years"] = enriched.year
+        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+            response = await client.get(f"/search/{resource}", headers=self._public_headers(), params=params)
+            response.raise_for_status()
+            payload = response.json()
+        best = None
+        best_score = -1.0
+        for item in payload if isinstance(payload, list) else []:
+            node = item.get(resource) or {}
+            title = str(node.get("title") or "").strip().casefold()
+            original_title = str(node.get("original_title") or "").strip().casefold()
+            query_title = str(query).strip().casefold()
+            score = 0.0
+            if query_title and query_title in {title, original_title}:
+                score += 2.0
+            elif query_title and (query_title in title or query_title in original_title):
+                score += 1.0
+            if enriched.year and node.get("year") == enriched.year:
+                score += 2.0
+            score += float(item.get("score") or 0)
+            if score > best_score:
+                best_score = score
+                best = node
+        if not isinstance(best, dict):
+            return enriched
+        ratings = dict(enriched.ratings)
+        rating = best.get("rating")
+        if rating not in (None, ""):
+            with contextlib.suppress(TypeError, ValueError):
+                ratings["Trakt"] = f"{float(rating):.1f}/10"
+        enriched.ratings = ratings
+        if isinstance(enriched.payload, dict):
+            ids = (enriched.payload.get("ids") or {}) if isinstance(enriched.payload.get("ids"), dict) else {}
+            trakt_id = ((best.get("ids") or {}) if isinstance(best.get("ids"), dict) else {}).get("trakt")
+            if isinstance(trakt_id, int):
+                ids["trakt"] = trakt_id
+                enriched.payload["ids"] = ids
+        return enriched
 
     def _headers(self, access_token: str) -> dict[str, str]:
         return {

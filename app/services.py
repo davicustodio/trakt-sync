@@ -282,7 +282,8 @@ class PipelineService:
                         "alt_titles": candidate.alt_titles,
                     },
                 )
-        return await self.omdb.attach_ratings(enriched)
+        enriched = await self.omdb.attach_ratings(enriched)
+        return await self.trakt.attach_public_ratings(enriched)
 
     async def enrich_from_user_confirmation(
         self,
@@ -319,7 +320,8 @@ class PipelineService:
                 visible_text=[f"user_hint={selection.strip()}"],
             )
         enriched = await self.tmdb.search_and_enrich(candidate)
-        return await self.omdb.attach_ratings(enriched)
+        enriched = await self.omdb.attach_ratings(enriched)
+        return await self.trakt.attach_public_ratings(enriched)
 
     async def format_media_reply(self, enriched: EnrichedMedia) -> str:
         ratings_lines = [f"- {label}: {value}" for label, value in enriched.ratings.items()]
@@ -354,7 +356,7 @@ class PipelineService:
     async def format_review_messages(self, enriched: EnrichedMedia) -> list[str]:
         reviews = [str(review).strip() for review in await self.reviews.fetch_reviews(enriched) if str(review).strip()]
         if not reviews:
-            return ["Reviews\nNao encontrei reviews publicas integrais disponiveis na API oficial do TMDb para este titulo."]
+            return ["Reviews\nNao encontrei reviews publicas integrais disponiveis via Trakt para este titulo."]
         localized = await self.openrouter.translate_reviews_to_pt_br(reviews, title=getattr(enriched, "title", None))
         final_reviews = localized[: len(reviews)] if localized else reviews[:]
         return [f"Review {index + 1}\n{review}" for index, review in enumerate(final_reviews)]

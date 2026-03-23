@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from app.clients import EvolutionClient, OpenRouterClient, TMDbClient, TMDbReviewClient, TelegramClient
+from app.clients import EvolutionClient, OpenRouterClient, TMDbClient, TMDbReviewClient, TelegramClient, TraktReviewClient
 from app.config import Settings
 from app.exceptions import VisionIdentificationError
 from app.schemas import VisionCandidate
@@ -306,6 +306,20 @@ def test_extract_explicit_title_from_lines_prefers_original_title_label() -> Non
     assert title == "The Aeronauts"
 
 
+def test_extract_year_from_lines_finds_catalog_year() -> None:
+    client = OpenRouterClient(build_settings())
+
+    year = client._extract_year_from_lines(
+        [
+            "Os Aeronautas",
+            "Titulo original: The Aeronauts",
+            "2019 · 12 · 1 h 40 min",
+        ]
+    )
+
+    assert year == 2019
+
+
 def test_identify_title_from_ocr_uses_explicit_original_title_from_variant(monkeypatch) -> None:
     client = OpenRouterClient(build_settings())
     monkeypatch.setattr(client, "_build_ocr_variants", lambda image_bytes: [("metadata-crop", b"variant")])
@@ -324,6 +338,23 @@ def test_identify_title_from_ocr_uses_explicit_original_title_from_variant(monke
     assert candidate is not None
     assert candidate.detected_title == "The Aeronauts"
     assert candidate.confidence == 0.99
+    assert candidate.year == 2019
+
+
+def test_guess_title_line_rejects_promotional_tagline() -> None:
+    client = OpenRouterClient(build_settings())
+
+    title = client._guess_title_line(
+        [
+            {
+                "text": "UMA INSPIRACAO BRILHANTE",
+                "bbox": [(0, 20), (100, 20), (100, 60), (0, 60)],
+                "score": 0.99,
+            }
+        ]
+    )
+
+    assert title is None
 
 
 @pytest.mark.asyncio
@@ -433,6 +464,77 @@ async def test_tmdb_review_client_prioritizes_rated_and_longer_reviews(monkeypat
     assert "Long and highly rated review" in reviews[0]
     assert "Shorter but highly rated review" in reviews[1]
     assert "Solid medium review" in reviews[2]
+
+
+@pytest.mark.asyncio
+async def test_trakt_review_client_filters_toxic_comments_and_prefers_review_quality(monkeypatch) -> None:
+    payload = [
+        {
+            "comment": "awful",
+            "review": False,
+            "likes": 0,
+            "replies": 0,
+            "user_rating": None,
+        },
+        {
+            "comment": "This movie should honestly be categorized as sci-fi. Stop glazing them — they won't cum on your face." * 3,
+            "review": False,
+            "likes": 10,
+            "replies": 5,
+            "user_rating": 1,
+        },
+        {
+            "comment": "A substantial review discussing performances, historical liberties, direction, and survival drama in meaningful detail. " * 4,
+            "review": True,
+            "likes": 3,
+            "replies": 1,
+            "user_rating": 8,
+        },
+        {
+            "comment": "Another long comment with thoughtful criticism of pacing, screenplay, and the chemistry between the leads. " * 4,
+            "review": False,
+            "likes": 5,
+            "replies": 2,
+            "user_rating": 9,
+        },
+    ]
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> list[dict]:
+            return payload
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            self.base_url = kwargs.get("base_url")
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, path: str, headers: dict[str, str], params: dict[str, object]) -> FakeResponse:
+            assert path == "/movies/363442/comments/newest"
+            return FakeResponse()
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    client = TraktReviewClient(build_settings())
+    enriched = SimpleNamespace(
+        media_type="movie",
+        payload={"ids": {"trakt": 363442}},
+        title="The Aeronauts",
+        original_title="The Aeronauts",
+        year=2019,
+    )
+    reviews = await client.fetch_reviews(enriched)
+
+    assert len(reviews) == 2
+    assert reviews[0].startswith("A substantial review")
+    assert all("cum on your face" not in review for review in reviews)
 
 
 @pytest.mark.asyncio
@@ -899,3 +1001,34 @@ async def test_tmdb_prefers_unique_exact_title_and_year_match(monkeypatch) -> No
 
     assert enriched.tmdb_id == 680
     assert enriched.title == "Busca Implacável"
+
+
+def test_tmdb_select_best_match_prefers_exact_year_when_same_original_title() -> None:
+    client = TMDbClient(build_settings())
+    candidate = VisionCandidate(detected_title="The Aeronauts", media_type="movie", year=2019, confidence=0.99)
+
+    best = client._select_best_match(
+        candidate,
+        [
+            (
+                3.2,
+                {
+                    "title": "The Aeronauts",
+                    "original_title": "The Aeronauts",
+                    "release_date": "1984-01-01",
+                    "media_type": "movie",
+                },
+            ),
+            (
+                3.4,
+                {
+                    "title": "Os Aeronautas",
+                    "original_title": "The Aeronauts",
+                    "release_date": "2019-12-20",
+                    "media_type": "movie",
+                },
+            ),
+        ],
+    )
+
+    assert best["release_date"] == "2019-12-20"

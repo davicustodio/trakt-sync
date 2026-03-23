@@ -354,7 +354,7 @@ class PipelineService:
     async def format_review_messages(self, enriched: EnrichedMedia) -> list[str]:
         reviews = [str(review).strip() for review in await self.reviews.fetch_reviews(enriched) if str(review).strip()]
         if not reviews:
-            return ["Reviews\nNao encontrei reviews publicas integrais disponiveis em IMDb ou Letterboxd para este titulo."]
+            return ["Reviews\nNao encontrei reviews publicas integrais disponiveis na API oficial do TMDb para este titulo."]
         localized = await self.openrouter.translate_reviews_to_pt_br(reviews, title=getattr(enriched, "title", None))
         final_reviews = localized[: len(reviews)] if localized else reviews[:]
         return [f"Review {index + 1}\n{review}" for index, review in enumerate(final_reviews)]

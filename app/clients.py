@@ -1112,96 +1112,63 @@ class OMDbClient:
         return enriched
 
 
-class IMDbReviewClient:
+class TMDbReviewClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
-    async def fetch_reviews(self, imdb_id: str) -> list[str]:
-        url = f"https://www.imdb.com/title/{imdb_id}/reviews/"
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        if response.status_code >= 400 or "x-amzn-waf-action" in response.headers:
+    async def fetch_reviews(self, enriched: EnrichedMedia) -> list[str]:
+        if not enriched.tmdb_id:
             return []
-        html = response.text
-        if "review-container" not in html and "user-review-card" not in html:
-            return []
-        snippets = re.findall(r'<div[^>]+class="[^"]*(?:review-container|user-review-card)[^"]*"[^>]*>(.*?)</div>\s*</div>', html, re.DOTALL)
-        results: list[str] = []
-        for snippet in snippets:
-            text = self._clean_html(snippet)
-            if text and len(text) >= 80 and text not in results:
-                results.append(text)
-            if len(results) == 3:
-                break
-        return results
-
-    def _clean_html(self, html: str) -> str:
-        text = re.sub(r"<script.*?</script>", " ", html, flags=re.DOTALL)
-        text = re.sub(r"<style.*?</style>", " ", text, flags=re.DOTALL)
-        text = re.sub(r"<[^>]+>", " ", text)
-        text = unescape(" ".join(text.split()))
-        return text.strip()
-
-
-class LetterboxdReviewClient:
-    def __init__(self, settings: Settings) -> None:
-        self.settings = settings
-
-    async def fetch_reviews(self, title: str) -> list[str]:
-        slug = self._slugify(title)
-        if not slug:
-            return []
-        url = f"https://letterboxd.com/film/{slug}/"
-        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
-            response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
-        if response.status_code >= 400:
-            return []
-        html = response.text
-        if "js-review-body" not in html:
-            return []
-        blocks = re.findall(
-            r'<div class="body-text -prose -reset js-review-body js-collapsible-text"(?P<attrs>[^>]*)>(?P<body>.*?)</div>',
-            html,
-            re.DOTALL,
-        )
+        endpoint = f"/tv/{enriched.tmdb_id}/reviews" if enriched.media_type == "series" else f"/movie/{enriched.tmdb_id}/reviews"
+        params = {"language": "en-US", "page": 1}
+        async with httpx.AsyncClient(base_url="https://api.themoviedb.org/3", timeout=30.0) as client:
+            response = await client.get(endpoint, headers=self._headers(), params=params)
+            response.raise_for_status()
+            payload = response.json()
         reviews: list[str] = []
-        for attrs, body in blocks:
-            if "data-full-text-url" in attrs and 'class="collapsed-text"' in body:
+        for item in payload.get("results", []) if isinstance(payload, dict) else []:
+            text = self._normalize_review_text(item.get("content"))
+            if not text:
                 continue
-            text = self._clean_html(body)
-            if text and text not in reviews:
+            if self._looks_like_transcript_or_chat(text):
+                continue
+            if text not in reviews:
                 reviews.append(text)
             if len(reviews) == 3:
                 break
         return reviews
 
-    def _slugify(self, title: str) -> str:
-        normalized = unescape(title).casefold()
-        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
-        return normalized.strip("-")
+    def _headers(self) -> dict[str, str]:
+        return {
+            "Authorization": f"Bearer {self.settings.tmdb_api_token}",
+            "accept": "application/json",
+        }
 
-    def _clean_html(self, html: str) -> str:
-        text = re.sub(r"<[^>]+>", " ", html)
-        text = unescape(" ".join(text.split()))
-        return text.strip()
+    def _normalize_review_text(self, value: Any) -> str:
+        text = " ".join(str(value or "").split())
+        if len(text) < 180:
+            return ""
+        return text[:6000]
+
+    def _looks_like_transcript_or_chat(self, text: str) -> bool:
+        lowered = text.casefold()
+        if re.search(r"\b\d{1,2}:\d{2}:\d{2}\b", text):
+            return True
+        if text.count('"') >= 8 or text.count("“") + text.count("”") >= 8:
+            return True
+        if re.search(r"\b(epa|cara|quer um cafe|pizza\?)\b", lowered):
+            return True
+        dialogue_markers = sum(lowered.count(token) for token in [" eu ", " voce ", " sim ", " nao ", " quando? ", " por que? "])
+        return dialogue_markers >= 8
 
 
 class ReviewSourceClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
-        self.letterboxd = LetterboxdReviewClient(settings)
-        self.imdb = IMDbReviewClient(settings)
+        self.tmdb = TMDbReviewClient(settings)
 
     async def fetch_reviews(self, enriched: EnrichedMedia) -> list[str]:
-        if enriched.media_type == "movie":
-            letterboxd_reviews = await self.letterboxd.fetch_reviews(enriched.title)
-            if letterboxd_reviews:
-                return letterboxd_reviews
-        if enriched.imdb_id:
-            imdb_reviews = await self.imdb.fetch_reviews(enriched.imdb_id)
-            if imdb_reviews:
-                return imdb_reviews
-        return []
+        return await self.tmdb.fetch_reviews(enriched)
 
 
 class TraktClient:

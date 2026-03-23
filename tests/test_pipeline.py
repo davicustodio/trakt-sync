@@ -96,7 +96,7 @@ async def test_format_review_messages_reports_missing_reviews_when_tmdb_has_no_r
 
     messages = await pipeline.format_review_messages(enriched)
 
-    assert messages == ["Reviews\nNao encontrei reviews publicas integrais disponiveis em IMDb ou Letterboxd para este titulo."]
+    assert messages == ["Reviews\nNao encontrei reviews publicas integrais disponiveis na API oficial do TMDb para este titulo."]
 
 
 @pytest.mark.asyncio

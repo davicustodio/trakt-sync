@@ -8,7 +8,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from app.clients import EvolutionClient, LetterboxdReviewClient, OpenRouterClient, TMDbClient, TelegramClient
+from app.clients import EvolutionClient, OpenRouterClient, TMDbClient, TMDbReviewClient, TelegramClient
 from app.config import Settings
 from app.exceptions import VisionIdentificationError
 from app.schemas import VisionCandidate
@@ -293,18 +293,21 @@ def test_extract_title_from_context_lines_handles_social_header_clues() -> None:
 
 
 @pytest.mark.asyncio
-async def test_letterboxd_review_client_extracts_visible_reviews(monkeypatch) -> None:
-    html = """
-    <section class="film-reviews">
-      <div class="body-text -prose -reset js-review-body js-collapsible-text"><p>First original review.</p></div>
-      <div class="body-text -prose -reset js-review-body js-collapsible-text" data-full-text-url="/s/full-text/viewing:1/"><div class="collapsed-text"><p>Truncated review...</p></div></div>
-      <div class="body-text -prose -reset js-review-body js-collapsible-text"><p>Second original review.</p></div>
-    </section>
-    """
+async def test_tmdb_review_client_filters_transcript_like_reviews(monkeypatch) -> None:
+    payload = {
+        "results": [
+            {"content": "This is a complete and thoughtful review about the film craft, performances, and pacing. " * 6},
+            {"content": '0:00:00 "OK, here we go again." 1:05:00 "What was that?"' * 5},
+            {"content": "Another substantial review that discusses structure, themes, direction, and emotional payoff. " * 5},
+        ]
+    }
 
     class FakeResponse:
-        status_code = 200
-        text = html
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return payload
 
     class FakeAsyncClient:
         def __init__(self, *args, **kwargs) -> None:
@@ -316,15 +319,17 @@ async def test_letterboxd_review_client_extracts_visible_reviews(monkeypatch) ->
         async def __aexit__(self, exc_type, exc, tb) -> None:
             return None
 
-        async def get(self, url: str, headers: dict[str, str]) -> FakeResponse:
+        async def get(self, path: str, headers: dict[str, str], params: dict[str, object]) -> FakeResponse:
             return FakeResponse()
 
     monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
 
-    client = LetterboxdReviewClient(build_settings())
-    reviews = await client.fetch_reviews("Pulp Fiction")
+    client = TMDbReviewClient(build_settings())
+    enriched = SimpleNamespace(tmdb_id=550, media_type="movie")
+    reviews = await client.fetch_reviews(enriched)
 
-    assert reviews == ["First original review.", "Second original review."]
+    assert len(reviews) == 2
+    assert all("0:00:00" not in review for review in reviews)
 
 
 @pytest.mark.asyncio

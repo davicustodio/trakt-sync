@@ -18,6 +18,7 @@ async def init_db() -> None:
     async with engine.begin() as connection:
         await connection.run_sync(Base.metadata.create_all)
         await connection.run_sync(_ensure_phone_profiles_columns)
+        await connection.run_sync(_ensure_chat_states_columns)
 
 
 async def get_db_session() -> AsyncIterator[AsyncSession]:
@@ -35,3 +36,10 @@ def _ensure_phone_profiles_columns(connection) -> None:
                 f"ALTER TABLE phone_profiles ADD COLUMN telegram_access_granted BOOLEAN NOT NULL DEFAULT {default_false}"
             )
         )
+
+
+def _ensure_chat_states_columns(connection) -> None:
+    inspector = inspect(connection)
+    columns = {column["name"] for column in inspector.get_columns("chat_states")}
+    if "pending_identification" not in columns:
+        connection.execute(text("ALTER TABLE chat_states ADD COLUMN pending_identification JSON"))

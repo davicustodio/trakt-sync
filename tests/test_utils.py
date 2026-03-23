@@ -112,6 +112,33 @@ def test_extract_message_from_telegram_photo_caption_payload() -> None:
     assert extracted.text_body == "x-info"
 
 
+def test_extract_message_from_telegram_image_document_payload() -> None:
+    payload = {
+        "update_id": 1002,
+        "message": {
+            "message_id": 89,
+            "from": {"id": 321, "first_name": "Davi", "username": "davi"},
+            "chat": {"id": 321, "type": "private"},
+            "caption": None,
+            "document": {
+                "file_id": "doc-image-1",
+                "mime_type": "image/png",
+                "file_name": "image.png",
+            },
+        },
+    }
+
+    extracted = extract_message_from_telegram(payload)
+
+    assert extracted is not None
+    assert extracted.channel == "telegram"
+    assert extracted.provider_message_id == "89"
+    assert extracted.message_type == "image"
+    assert extracted.media_file_id == "doc-image-1"
+    assert extracted.media_url == "doc-image-1"
+    assert extracted.media_mime_type == "image/png"
+
+
 def test_build_telegram_user_key_and_canonical_command() -> None:
     assert build_telegram_user_key(123) == "telegram_123"
     assert canonical_command("  X-INFO  ") == "x-info"

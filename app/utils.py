@@ -179,12 +179,21 @@ def extract_message_from_telegram(payload: dict[str, Any]) -> ExtractedMessage |
     text = first_not_empty(message.get("text"), message.get("caption"))
     photo_entries = message.get("photo") or []
     photo = photo_entries[-1] if isinstance(photo_entries, list) and photo_entries else None
-    message_type = "image" if isinstance(photo, dict) else "text"
-    media_file_id = photo.get("file_id") if isinstance(photo, dict) else None
+    document = message.get("document") if isinstance(message.get("document"), dict) else None
+    document_mime_type = str((document or {}).get("mime_type") or "").strip().lower()
+    image_document = document if document and document_mime_type.startswith("image/") else None
+    media_payload = photo if isinstance(photo, dict) else image_document
+    message_type = "image" if isinstance(media_payload, dict) else "text"
+    media_file_id = media_payload.get("file_id") if isinstance(media_payload, dict) else None
 
     requester_user_id = str(from_user.get("id") or chat_id)
     user_key = build_telegram_user_key(requester_user_id)
-    mime_type = "image/jpeg" if media_file_id else None
+    if isinstance(photo, dict):
+        mime_type = "image/jpeg"
+    elif image_document is not None:
+        mime_type = document_mime_type or "image/jpeg"
+    else:
+        mime_type = None
 
     return ExtractedMessage(
         channel="telegram",

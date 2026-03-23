@@ -53,6 +53,22 @@ def build_payload(*, text: str = "x-info", include_photo: bool = False) -> dict:
     return {"update_id": 9001, "message": message}
 
 
+def build_document_payload() -> dict:
+    return {
+        "update_id": 9002,
+        "message": {
+            "message_id": 78,
+            "from": {"id": 321, "first_name": "Davi", "username": "davi"},
+            "chat": {"id": 321, "type": "private"},
+            "document": {
+                "file_id": "doc-image-1",
+                "mime_type": "image/png",
+                "file_name": "image.png",
+            },
+        },
+    }
+
+
 def test_telegram_webhook_acknowledges_and_schedules_x_info(monkeypatch) -> None:
     app.dependency_overrides[settings_dep] = lambda: build_settings()
     app.dependency_overrides[db_dep] = fake_db_dep
@@ -151,6 +167,60 @@ def test_telegram_webhook_auto_triggers_on_photo_without_x_info(monkeypatch) -> 
             "/webhooks/telegram",
             headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
             json=build_payload(text="", include_photo=True),
+        )
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "command": "x-info"}
+    assert sent == [
+        ("321", "Recebi sua imagem. Estou analisando agora."),
+        ("321", "[x-info] Etapa 1/6: preparando o processamento."),
+    ]
+    assert scheduled == [("x-info", "321", "telegram_321", 500)]
+
+
+def test_telegram_webhook_auto_triggers_on_image_document_without_x_info(monkeypatch) -> None:
+    app.dependency_overrides[settings_dep] = lambda: build_settings()
+    app.dependency_overrides[db_dep] = fake_db_dep
+    sent: list[tuple[str, str]] = []
+    scheduled: list[tuple[str, str, str, int | None]] = []
+
+    class FakeTelegramClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> int | None:
+            sent.append((chat_id, text))
+            if "Etapa 1/" in text:
+                return 500
+            return 400
+
+    async def fake_persist(self, normalized):
+        from app.services import PersistMessageResult
+        from types import SimpleNamespace
+
+        return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
+
+    async def fake_dispatch(command, chat_id, requester_key, background_tasks, trigger_message_id=None, status_message_id=None):
+        scheduled.append((command, chat_id, requester_key, status_message_id))
+
+    class FakeOpenRouterClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def refresh_free_text_models_if_due(self) -> None:
+            return None
+
+    monkeypatch.setattr("app.main.TelegramClient", FakeTelegramClient)
+    monkeypatch.setattr("app.main.OpenRouterClient", FakeOpenRouterClient)
+    monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+    monkeypatch.setattr("app.main.dispatch_telegram_command", fake_dispatch)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
+            json=build_document_payload(),
         )
 
     app.dependency_overrides.clear()

@@ -292,6 +292,20 @@ def test_extract_title_from_context_lines_handles_social_header_clues() -> None:
     assert title == "Virgin River"
 
 
+def test_extract_explicit_title_from_lines_prefers_original_title_label() -> None:
+    client = OpenRouterClient(build_settings())
+
+    title = client._extract_explicit_title_from_lines(
+        [
+            "Os Aeronautas",
+            "Titulo original: The Aeronauts",
+            "2019 · 12 · 1 h 40 min",
+        ]
+    )
+
+    assert title == "The Aeronauts"
+
+
 @pytest.mark.asyncio
 async def test_tmdb_review_client_filters_transcript_like_reviews(monkeypatch) -> None:
     payload = {
@@ -496,6 +510,26 @@ async def test_identify_title_tries_assertive_paid_models_when_initial_pass_is_w
     assert candidate.detected_title == "The Gift"
     assert calls[0] is None
     assert calls[1][0] == "google/gemini-3-flash-preview"
+
+
+@pytest.mark.asyncio
+async def test_identify_title_rejects_free_candidate_that_conflicts_with_visible_text(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+    monkeypatch.setattr(
+        client,
+        "_identify_title_from_ocr",
+        lambda image_bytes: VisionCandidate(
+            detected_title="The Aeronauts",
+            media_type="unknown",
+            confidence=0.91,
+            visible_text=["Titulo original: The Aeronauts", "THE AERONAUTS"],
+        ),
+    )
+
+    candidate = await client.identify_title(b"fake-image")
+
+    assert candidate.detected_title == "The Aeronauts"
+    assert candidate.confidence == 0.91
 
 
 @pytest.mark.asyncio

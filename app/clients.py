@@ -333,6 +333,13 @@ class OpenRouterClient:
                         f" Visible text may read as '{ocr_hint.detected_title}'. "
                         "If spacing is collapsed, restore the natural title spacing before answering."
                     )
+                assertive_first = self._should_prioritize_assertive_title_resolution(ocr_hint)
+                if assertive_first:
+                    assertive_candidate, assertive_attempts = await self._query_assertive_text_candidate(image_bytes, ocr_hint)
+                    attempts.extend(assertive_attempts)
+                    if assertive_candidate.detected_title and self._candidate_matches_visible_text(assertive_candidate, ocr_hint):
+                        return assertive_candidate
+
                 prompt = (
                     "A imagem em anexo se refere a algum filme ou serie. "
                     "Seu objetivo e descobrir o titulo ORIGINAL desse filme ou serie. "
@@ -348,12 +355,17 @@ class OpenRouterClient:
                 parsed, query_attempts = await self._query_candidate(image_b64, prompt, use_json_mode=True)
                 attempts.extend(query_attempts)
                 if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
-                    return parsed
+                    if self._candidate_matches_visible_text(parsed, ocr_hint):
+                        return parsed
+                    attempts.append("free-candidate-rejected-by-visible-text")
 
                 assertive_candidate, assertive_attempts = await self._query_assertive_text_candidate(image_bytes, ocr_hint)
                 attempts.extend(assertive_attempts)
                 if assertive_candidate.detected_title and assertive_candidate.confidence >= 0.7:
-                    return assertive_candidate
+                    if not self._candidate_matches_visible_text(assertive_candidate, ocr_hint):
+                        attempts.append("assertive-candidate-rejected-by-visible-text")
+                    else:
+                        return assertive_candidate
 
                 ocr_prompt = (
                     "Leia o texto visivel na imagem e use esse texto junto com o contexto visual para inferir o titulo ORIGINAL do filme ou da serie. "
@@ -365,12 +377,16 @@ class OpenRouterClient:
                 parsed, query_attempts = await self._query_candidate(image_b64, ocr_prompt, use_json_mode=False)
                 attempts.extend(query_attempts)
                 if parsed.detected_title and parsed.confidence >= 0.75:
-                    return parsed
+                    if self._candidate_matches_visible_text(parsed, ocr_hint):
+                        return parsed
+                    attempts.append("ocr-prompt-candidate-rejected-by-visible-text")
 
                 rescue_candidate, rescue_attempts = await self._query_scene_rescue_candidate(image_bytes, ocr_hint)
                 attempts.extend(rescue_attempts)
                 if rescue_candidate.detected_title and rescue_candidate.confidence >= 0.55:
-                    return rescue_candidate
+                    if self._candidate_matches_visible_text(rescue_candidate, ocr_hint):
+                        return rescue_candidate
+                    attempts.append("rescue-candidate-rejected-by-visible-text")
         except TimeoutError:
             attempts.append("vision-time-budget-exceeded")
         raise VisionIdentificationError("Nao consegui identificar o titulo com confianca suficiente.", attempts)
@@ -435,6 +451,15 @@ class OpenRouterClient:
             if not lines:
                 continue
 
+            explicit_title = self._extract_explicit_title_from_lines(lines)
+            if explicit_title:
+                return VisionCandidate(
+                    detected_title=explicit_title,
+                    media_type="unknown",
+                    confidence=0.99,
+                    visible_text=[*lines, f"ocr_variant={variant_name}"],
+                )
+
             for line in lines:
                 match = re.search(r"(?P<title>[A-Za-z0-9' .,:!?-]{2,})\((?P<year>\d{4})\)", line)
                 if not match:
@@ -481,6 +506,69 @@ class OpenRouterClient:
         if not title.isalpha():
             return True
         return False
+
+    def _should_prioritize_assertive_title_resolution(self, candidate: VisionCandidate | None) -> bool:
+        if candidate is None:
+            return False
+        if candidate.year:
+            return True
+        visible_text = " ".join(candidate.visible_text or []).casefold()
+        if "titulo original" in visible_text or "original title" in visible_text:
+            return True
+        title = (candidate.detected_title or "").strip()
+        return len(title.split()) >= 2
+
+    def _extract_explicit_title_from_lines(self, lines: list[str]) -> str | None:
+        patterns = [
+            r"titulo\s+original\s*[:\-]\s*(?P<title>[A-Za-z0-9'& .,:!?-]{2,})",
+            r"original\s+title\s*[:\-]\s*(?P<title>[A-Za-z0-9'& .,:!?-]{2,})",
+        ]
+        for raw_line in lines:
+            line = " ".join(str(raw_line).split())
+            for pattern in patterns:
+                match = re.search(pattern, line, flags=re.IGNORECASE)
+                if not match:
+                    continue
+                title = match.group("title").strip(" -")
+                if title:
+                    return title
+        return None
+
+    def _candidate_matches_visible_text(
+        self,
+        candidate: VisionCandidate,
+        ocr_hint: VisionCandidate | None,
+    ) -> bool:
+        if ocr_hint is None:
+            return True
+        hint_title = (ocr_hint.detected_title or "").strip()
+        visible_text = " ".join(ocr_hint.visible_text or [])
+        reference = " ".join(part for part in [hint_title, visible_text] if part).casefold()
+        if not reference:
+            return True
+        candidate_tokens = self._title_tokens(candidate.detected_title or "")
+        if not candidate_tokens:
+            return True
+        reference_tokens = self._title_tokens(reference)
+        if not reference_tokens:
+            compact_reference = re.sub(r"[^a-z0-9]+", "", reference)
+            compact_candidate = re.sub(r"[^a-z0-9]+", "", (candidate.detected_title or "").casefold())
+            return bool(compact_reference and compact_candidate and compact_candidate in compact_reference)
+        overlap = candidate_tokens & reference_tokens
+        if overlap:
+            return True
+        compact_reference = re.sub(r"[^a-z0-9]+", "", reference)
+        compact_candidate = re.sub(r"[^a-z0-9]+", "", (candidate.detected_title or "").casefold())
+        return bool(compact_reference and compact_candidate and compact_candidate in compact_reference)
+
+    def _title_tokens(self, value: str) -> set[str]:
+        stopwords = {"the", "a", "an", "of", "and", "os", "as", "o", "a", "de", "da", "do", "der", "die"}
+        tokens = {
+            token
+            for token in re.findall(r"[a-z0-9]+", value.casefold())
+            if len(token) >= 3 and token not in stopwords
+        }
+        return tokens
 
     def _build_ocr_variants(self, image_bytes: bytes) -> list[tuple[str, bytes]]:
         variants = [("original", image_bytes)]

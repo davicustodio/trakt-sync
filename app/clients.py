@@ -1120,23 +1120,63 @@ class TMDbReviewClient:
         if not enriched.tmdb_id:
             return []
         endpoint = f"/tv/{enriched.tmdb_id}/reviews" if enriched.media_type == "series" else f"/movie/{enriched.tmdb_id}/reviews"
-        params = {"language": "en-US", "page": 1}
         async with httpx.AsyncClient(base_url="https://api.themoviedb.org/3", timeout=30.0) as client:
-            response = await client.get(endpoint, headers=self._headers(), params=params)
-            response.raise_for_status()
-            payload = response.json()
+            collected = await self._fetch_review_candidates(client, endpoint)
+        ranked = sorted(collected, key=self._review_sort_key, reverse=True)
         reviews: list[str] = []
-        for item in payload.get("results", []) if isinstance(payload, dict) else []:
-            text = self._normalize_review_text(item.get("content"))
-            if not text:
-                continue
-            if self._looks_like_transcript_or_chat(text):
-                continue
+        for _, text in ranked:
             if text not in reviews:
                 reviews.append(text)
             if len(reviews) == 3:
                 break
         return reviews
+
+    async def _fetch_review_candidates(
+        self,
+        client: httpx.AsyncClient,
+        endpoint: str,
+    ) -> list[tuple[tuple[int, float, int], str]]:
+        collected: list[tuple[tuple[int, float, int], str]] = []
+        for page in (1, 2):
+            response = await client.get(endpoint, headers=self._headers(), params={"language": "en-US", "page": page})
+            response.raise_for_status()
+            payload = response.json()
+            page_results = payload.get("results", []) if isinstance(payload, dict) else []
+            if not page_results:
+                break
+            for item in page_results:
+                text = self._normalize_review_text(item.get("content"))
+                if not text:
+                    continue
+                if self._looks_like_transcript_or_chat(text):
+                    continue
+                collected.append((self._build_review_rank(item, text), text))
+            total_pages = int(payload.get("total_pages") or 1) if isinstance(payload, dict) else 1
+            if page >= total_pages:
+                break
+        return collected
+
+    def _build_review_rank(self, item: dict[str, Any], text: str) -> tuple[int, float, int]:
+        author_details = item.get("author_details") if isinstance(item, dict) else {}
+        raw_rating = (author_details or {}).get("rating")
+        rating = self._parse_rating(raw_rating)
+        has_rating = 1 if rating is not None else 0
+        normalized_rating = rating if rating is not None else -1.0
+        return (has_rating, normalized_rating, len(text))
+
+    def _review_sort_key(self, item: tuple[tuple[int, float, int], str]) -> tuple[int, float, int]:
+        return item[0]
+
+    def _parse_rating(self, value: Any) -> float | None:
+        if value in (None, ""):
+            return None
+        try:
+            rating = float(value)
+        except (TypeError, ValueError):
+            return None
+        if rating < 0:
+            return None
+        return rating
 
     def _headers(self) -> dict[str, str]:
         return {

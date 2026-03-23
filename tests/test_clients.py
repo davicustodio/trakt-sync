@@ -333,6 +333,75 @@ async def test_tmdb_review_client_filters_transcript_like_reviews(monkeypatch) -
 
 
 @pytest.mark.asyncio
+async def test_tmdb_review_client_prioritizes_rated_and_longer_reviews(monkeypatch) -> None:
+    payload_by_page = {
+        1: {
+            "page": 1,
+            "total_pages": 2,
+            "results": [
+                {
+                    "content": "Shorter but highly rated review about the performances and direction. " * 4,
+                    "author_details": {"rating": 9},
+                },
+                {
+                    "content": "Very long unrated review about themes, pacing, cinematography, and structure. " * 8,
+                    "author_details": {"rating": None},
+                },
+            ],
+        },
+        2: {
+            "page": 2,
+            "total_pages": 2,
+            "results": [
+                {
+                    "content": "Long and highly rated review with detailed analysis of character arcs, editing, and emotional payoff. "
+                    * 7,
+                    "author_details": {"rating": 10},
+                },
+                {
+                    "content": "Solid medium review focused on screenplay and atmosphere. " * 5,
+                    "author_details": {"rating": 8},
+                },
+            ],
+        },
+    }
+
+    class FakeResponse:
+        def __init__(self, page: int) -> None:
+            self.page = page
+
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return payload_by_page[self.page]
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, path: str, headers: dict[str, str], params: dict[str, object]) -> FakeResponse:
+            return FakeResponse(int(params["page"]))
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    client = TMDbReviewClient(build_settings())
+    enriched = SimpleNamespace(tmdb_id=550, media_type="movie")
+    reviews = await client.fetch_reviews(enriched)
+
+    assert len(reviews) == 3
+    assert "Long and highly rated review" in reviews[0]
+    assert "Shorter but highly rated review" in reviews[1]
+    assert "Solid medium review" in reviews[2]
+
+
+@pytest.mark.asyncio
 async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> None:
     client = OpenRouterClient(build_settings())
     client._ocr_engine = object()

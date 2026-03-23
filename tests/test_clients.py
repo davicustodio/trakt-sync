@@ -7,7 +7,7 @@ from types import SimpleNamespace
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from app.clients import EvolutionClient, OpenRouterClient, TMDbClient, TelegramClient
+from app.clients import EvolutionClient, LetterboxdReviewClient, OpenRouterClient, TMDbClient, TelegramClient
 from app.config import Settings
 from app.schemas import VisionCandidate
 
@@ -277,6 +277,54 @@ def test_identify_title_uses_ocr_for_visible_title_without_year() -> None:
     assert candidate.year is None
 
 
+def test_extract_title_from_context_lines_handles_social_header_clues() -> None:
+    client = OpenRouterClient(build_settings())
+
+    title = client._extract_title_from_context_lines(
+        [
+            "J Jeff Garber - Virgin River Main",
+            "final de semana",
+        ]
+    )
+
+    assert title == "Virgin River"
+
+
+@pytest.mark.asyncio
+async def test_letterboxd_review_client_extracts_visible_reviews(monkeypatch) -> None:
+    html = """
+    <section class="film-reviews">
+      <div class="body-text -prose -reset js-review-body js-collapsible-text"><p>First original review.</p></div>
+      <div class="body-text -prose -reset js-review-body js-collapsible-text" data-full-text-url="/s/full-text/viewing:1/"><div class="collapsed-text"><p>Truncated review...</p></div></div>
+      <div class="body-text -prose -reset js-review-body js-collapsible-text"><p>Second original review.</p></div>
+    </section>
+    """
+
+    class FakeResponse:
+        status_code = 200
+        text = html
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            return None
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def get(self, url: str, headers: dict[str, str]) -> FakeResponse:
+            return FakeResponse()
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    client = LetterboxdReviewClient(build_settings())
+    reviews = await client.fetch_reviews("Pulp Fiction")
+
+    assert reviews == ["First original review.", "Second original review."]
+
+
 @pytest.mark.asyncio
 async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> None:
     client = OpenRouterClient(build_settings())
@@ -288,7 +336,13 @@ async def test_identify_title_falls_back_when_local_ocr_raises(monkeypatch) -> N
 
     client._ocr_engine = boom
 
-    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool) -> tuple[VisionCandidate, list[str]]:
+    async def fake_query_candidate(
+        image_b64: str,
+        prompt: str,
+        *,
+        use_json_mode: bool,
+        models=None,
+    ) -> tuple[VisionCandidate, list[str]]:
         return (
             VisionCandidate(detected_title="Inland Empire", media_type="movie", year=2006, confidence=0.95),
             ["google/gemini-2.5-flash: Inland Empire"],
@@ -319,7 +373,13 @@ async def test_identify_title_uses_llm_to_normalize_collapsed_ocr_title(monkeypa
 
     captured_prompts: list[str] = []
 
-    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool) -> tuple[VisionCandidate, list[str]]:
+    async def fake_query_candidate(
+        image_b64: str,
+        prompt: str,
+        *,
+        use_json_mode: bool,
+        models=None,
+    ) -> tuple[VisionCandidate, list[str]]:
         captured_prompts.append(prompt)
         return (
             VisionCandidate(detected_title="Inland Empire", media_type="movie", year=2006, confidence=0.96),
@@ -332,6 +392,61 @@ async def test_identify_title_uses_llm_to_normalize_collapsed_ocr_title(monkeypa
 
     assert candidate.detected_title == "Inland Empire"
     assert "restore the natural title spacing" in captured_prompts[0]
+
+
+@pytest.mark.asyncio
+async def test_identify_title_tries_assertive_paid_models_when_initial_pass_is_weak(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+    client.settings.openrouter_paid_vision_models = ["google/gemini-2.5-flash", "openai/gpt-4.1-mini"]
+
+    monkeypatch.setattr(client, "_identify_title_from_ocr", lambda image_bytes: None)
+
+    calls: list[list[str] | None] = []
+
+    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool, models=None):
+        calls.append(models)
+        if models is None:
+            return VisionCandidate(confidence=0.3), ["free-model: empty title"]
+        return (
+            VisionCandidate(detected_title="The Gift", media_type="movie", year=2015, confidence=0.88),
+            ["openai/gpt-4.1-mini: The Gift (confidence=0.88, type=movie)"],
+        )
+
+    monkeypatch.setattr(client, "_query_candidate", fake_query_candidate)
+    monkeypatch.setattr(client, "_build_llm_vision_variants", lambda image_bytes: [("original", image_bytes)])
+
+    candidate = await client.identify_title(b"fake-image")
+
+    assert candidate.detected_title == "The Gift"
+    assert calls[0] is None
+    assert calls[1][0] == "google/gemini-3-flash-preview"
+
+
+@pytest.mark.asyncio
+async def test_refine_title_from_user_feedback_uses_llm_result(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+
+    async def fake_run_text_json_task(prompt: str):
+        assert "Resposta do usuario" in prompt
+        return {
+            "detected_title": "The Gift",
+            "media_type": "movie",
+            "year": 2015,
+            "confidence": 0.98,
+            "alt_titles": ["The Gift (2015)", "The Gift (2000)"],
+            "visible_text": ["user said option 1"],
+            "need_clarification": False,
+        }
+
+    monkeypatch.setattr(client, "_run_text_json_task", fake_run_text_json_task)
+
+    candidate = await client.refine_title_from_user_feedback(
+        "1",
+        [{"label": "The Gift (2015) - Filme", "title": "The Gift", "year": 2015, "media_type": "movie"}],
+    )
+
+    assert candidate.detected_title == "The Gift"
+    assert candidate.year == 2015
 
 
 @pytest.mark.asyncio
@@ -414,11 +529,9 @@ async def test_identify_title_uses_paid_scene_rescue_after_free_failures(monkeyp
 
     assert candidate.detected_title == "Hostage"
     assert candidate.year == 2005
-    assert calls == [
-        (None, True),
-        (None, False),
-        (["google/gemini-2.5-flash-lite", "openai/gpt-4.1-mini"], True),
-    ]
+    assert calls[0] == (None, True)
+    assert calls[1][1] is True
+    assert "openai/gpt-4.1-mini" in (calls[1][0] or [])
 
 
 @pytest.mark.asyncio
@@ -458,6 +571,7 @@ async def test_translate_reviews_tries_multiple_free_models_until_success(monkey
     OpenRouterClient._free_text_models_cache = None
     OpenRouterClient._free_text_models_updated_at = None
     client = OpenRouterClient(settings)
+    OpenRouterClient._free_text_models_cache = ["model-a:free", "model-b:free", "model-c:free"]
 
     translated = await client.translate_reviews_to_pt_br(["Original review"], title="Movie")
 

@@ -91,6 +91,7 @@ class ChatState(Base):
     requester_phone: Mapped[str] = mapped_column(String(32), index=True)
     last_image_message_id: Mapped[int | None] = mapped_column(ForeignKey("incoming_messages.id"), nullable=True)
     last_identified_media_id: Mapped[int | None] = mapped_column(ForeignKey("identified_media.id"), nullable=True)
+    pending_identification: Mapped[dict[str, Any] | None] = mapped_column(JSON, nullable=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), onupdate=func.now(), nullable=False
     )

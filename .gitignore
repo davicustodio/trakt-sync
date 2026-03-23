@@ -3,6 +3,7 @@
 __pycache__/
 .pytest_cache/
 .playwright-cli/
+.cache/
 *.egg-info/
 trakt_sync.db
 test_trakt_sync.db

@@ -5,7 +5,8 @@ from types import SimpleNamespace
 import pytest
 
 from app.exceptions import AmbiguousTitleError, VisionIdentificationError
-from app.worker import process_x_info, process_x_save
+from app.schemas import PendingIdentificationState
+from app.worker import process_x_info, process_x_info_confirmation, process_x_save, process_x_watchlist_reply
 
 
 class DummyContextManager:
@@ -45,6 +46,9 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
         async def save_identified_media(self, message, enriched) -> None:
             raise AssertionError("ambiguous result must not be persisted")
 
+        async def store_pending_identification(self, chat_jid: str, requester_phone: str, pending) -> None:
+            sent_messages.append(f"pending:{pending.mode}:{len(pending.options)}")
+
     class FakeEvolution:
         async def send_text(self, chat_jid: str, text: str) -> None:
             sent_messages.append(text)
@@ -61,8 +65,14 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
         async def format_ambiguous_reply(self, options: list[str]) -> str:
             return "\n".join(options)
 
+        def build_pending_options(self, options: list[str], *, channel: str, image_message_id: int | None = None):
+            return PendingIdentificationState(mode="ambiguity", channel=channel, image_message_id=image_message_id, options=[])
+
         async def format_review_messages(self, enriched) -> list[str]:
             return []
+
+        async def format_watchlist_question(self, enriched) -> str:
+            return "Voce quer salvar este filme na sua watchlist do Trakt? Responda aqui com sim ou nao."
 
     monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
     monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
@@ -71,7 +81,7 @@ async def test_process_x_info_sends_ambiguity_message(monkeypatch) -> None:
 
     await process_x_info({}, "5519988343888@s.whatsapp.net", "5519988343888", "cmd-1")
 
-    assert sent_messages == ["Dark (2017) - Serie\n1899 (2022) - Serie"]
+    assert sent_messages == ["pending:ambiguity:0", "Dark (2017) - Serie\n1899 (2022) - Serie"]
 
 
 @pytest.mark.asyncio
@@ -117,6 +127,9 @@ async def test_process_x_save_uses_identified_ids_without_tmdb_lookup(monkeypatc
                 overview="Crime entrelacado.",
                 payload={"source": "tmdb"},
             )
+
+        async def clear_pending_identification(self, chat_jid: str, requester_phone: str | None = None) -> None:
+            return None
 
     class FakeEvolution:
         async def send_text(self, chat_jid: str, text: str) -> None:
@@ -176,6 +189,9 @@ async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypat
                 requester_phone="5511",
             )
 
+        async def store_pending_identification(self, chat_jid: str, requester_phone: str, pending) -> None:
+            return None
+
     class FakeEvolution:
         async def send_text(self, chat_jid: str, text: str) -> None:
             sent_messages.append(text)
@@ -193,6 +209,19 @@ async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypat
         async def format_review_messages(self, enriched) -> list[str]:
             return []
 
+        def build_pending_manual_input(self, *, channel: str, image_message_id: int | None = None, attempts=None):
+            return PendingIdentificationState(mode="manual-input", channel=channel, attempts=attempts or [])
+
+        async def format_manual_help_reply(self, attempts: list[str]) -> str:
+            return (
+                "Nao consegui identificar o titulo com confianca suficiente, mesmo apos tentar OCR e modelos de visao mais fortes.\n"
+                "Se voce souber o titulo, responda nesta conversa com algo como `The Gift (2015)` ou `Coherence (2013)`.\n"
+                "Se preferir, envie outra imagem ou mais contexto e eu tento de novo.\n\n"
+                "Modelos e etapas testados:\n"
+                "- ocr: no confident local text match\n"
+                "- google/gemini-2.5-flash: RuntimeError"
+            )
+
     monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
     monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
     monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
@@ -201,13 +230,12 @@ async def test_process_x_info_reports_model_attempts_on_vision_failure(monkeypat
     await process_x_info({}, "5519988343888@s.whatsapp.net", "5519988343888", "cmd-1")
 
     assert sent_messages == [
-        "Falha ao analisar a imagem para o x-info.\n"
-        "Motivo: Nao consegui identificar o titulo com confianca suficiente.\n"
+        "Nao consegui identificar o titulo com confianca suficiente, mesmo apos tentar OCR e modelos de visao mais fortes.\n"
+        "Se voce souber o titulo, responda nesta conversa com algo como `The Gift (2015)` ou `Coherence (2013)`.\n"
+        "Se preferir, envie outra imagem ou mais contexto e eu tento de novo.\n\n"
         "Modelos e etapas testados:\n"
         "- ocr: no confident local text match\n"
-        "- google/gemini-2.5-flash: RuntimeError\n"
-        "\n"
-        "Se esta imagem for um print do Instagram/WhatsApp, envie uma captura mais fechada no poster ou frame."
+        "- google/gemini-2.5-flash: RuntimeError"
     ]
 
 
@@ -266,3 +294,122 @@ async def test_process_x_save_reports_connect_link_when_trakt_missing(monkeypatc
         "Abra https://trakt-sync.example.com/admin/trakt/connect/5519988343888?token=secret "
         "para conectar sua conta Trakt e depois envie x-save novamente."
     ]
+
+
+@pytest.mark.asyncio
+async def test_process_x_info_confirmation_reuses_user_selection_and_persists(monkeypatch) -> None:
+    sent_messages: list[str] = []
+    saved: list[str] = []
+
+    class FakeMessageService:
+        def __init__(self, settings, db) -> None:
+            pass
+
+        async def get_pending_identification(self, chat_jid: str, requester_phone: str):
+            return PendingIdentificationState(
+                mode="ambiguity",
+                channel="whatsapp",
+                image_message_id=12,
+                options=[
+                    {"label": "The Gift (2015) - Filme", "title": "The Gift", "year": 2015, "media_type": "movie"}
+                ],
+            )
+
+        async def get_message_by_id(self, message_id: int):
+            assert message_id == 12
+            return SimpleNamespace(id=12, requester_phone="5511", chat_jid="5511@s.whatsapp.net")
+
+        async def save_identified_media(self, message, enriched) -> None:
+            saved.append(enriched.title)
+
+        async def store_pending_identification(self, chat_jid: str, requester_phone: str, pending) -> None:
+            saved.append(pending.mode)
+
+    class FakeEvolution:
+        async def send_text(self, chat_jid: str, text: str) -> None:
+            sent_messages.append(text)
+
+    class FakePipelineService:
+        def __init__(self, settings) -> None:
+            self.evolution = FakeEvolution()
+
+        async def enrich_from_user_confirmation(self, selection: str, pending):
+            assert selection == "1"
+            return SimpleNamespace(
+                title="The Gift",
+                original_title="The Gift",
+                localized_title="O Presente",
+                year=2015,
+                media_type="movie",
+                ratings={},
+                providers=[],
+                genres=[],
+                release_date="2015-08-07",
+                overview="Thriller.",
+            )
+
+        async def format_whatsapp_reply(self, enriched) -> str:
+            return "O Presente (2015)\nTitulo original: The Gift\nTitulo em portugues: O Presente"
+
+        async def format_review_messages(self, enriched) -> list[str]:
+            return ["Review 1"]
+
+        def build_pending_watchlist_confirmation(self, *, channel: str, identified_media_id: int | None = None):
+            return PendingIdentificationState(mode="watchlist-confirmation", channel=channel)
+
+        async def format_watchlist_question(self, enriched) -> str:
+            return "Voce quer salvar este filme na sua watchlist do Trakt? Responda aqui com sim ou nao."
+
+    monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
+    monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
+    monkeypatch.setattr("app.worker.PipelineService", FakePipelineService)
+
+    await process_x_info_confirmation({}, "5511@s.whatsapp.net", "5511", "1")
+
+    assert saved == ["The Gift", "watchlist-confirmation"]
+    assert sent_messages == [
+        "O Presente (2015)\nTitulo original: The Gift\nTitulo em portugues: O Presente",
+        "Review 1",
+        "Voce quer salvar este filme na sua watchlist do Trakt? Responda aqui com sim ou nao.",
+    ]
+
+
+@pytest.mark.asyncio
+async def test_process_x_watchlist_reply_accepts_no_and_clears_pending(monkeypatch) -> None:
+    sent_messages: list[str] = []
+    cleared: list[str] = []
+
+    class FakeMessageService:
+        def __init__(self, settings, db) -> None:
+            pass
+
+        async def get_pending_identification(self, chat_jid: str, requester_phone: str):
+            return PendingIdentificationState(mode="watchlist-confirmation", channel="whatsapp")
+
+        async def clear_pending_identification(self, chat_jid: str, requester_phone: str | None = None) -> None:
+            cleared.append(chat_jid)
+
+    class FakeEvolution:
+        async def send_text(self, chat_jid: str, text: str) -> None:
+            sent_messages.append(text)
+
+    class FakePipelineService:
+        def __init__(self, settings) -> None:
+            self.evolution = FakeEvolution()
+
+        async def format_watchlist_declined(self) -> str:
+            return "Certo, nao vou salvar este titulo na watchlist do Trakt."
+
+        async def format_watchlist_retry(self) -> str:
+            return "retry"
+
+    monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
+    monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
+    monkeypatch.setattr("app.worker.MessageService", FakeMessageService)
+    monkeypatch.setattr("app.worker.PipelineService", FakePipelineService)
+
+    await process_x_watchlist_reply({}, "5511@s.whatsapp.net", "5511", "nao")
+
+    assert cleared == ["5511@s.whatsapp.net"]
+    assert sent_messages == ["Certo, nao vou salvar este titulo na watchlist do Trakt."]

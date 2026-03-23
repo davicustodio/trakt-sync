@@ -8,6 +8,7 @@ import json
 import os
 import re
 import tempfile
+from html import unescape
 from io import BytesIO
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -330,11 +331,15 @@ class OpenRouterClient:
                 "If spacing is collapsed, restore the natural title spacing before answering."
             )
         prompt = (
-            "Identify the movie or TV series shown in the image. "
-            "Return JSON only with keys: detected_title, media_type, year, confidence, alt_titles, "
-            "visible_text, need_clarification. "
-            "media_type must be one of movie, series, unknown. "
-            "confidence must be between 0 and 1."
+            "A imagem em anexo se refere a algum filme ou serie. "
+            "Seu objetivo e descobrir o titulo ORIGINAL desse filme ou serie. "
+            "Use o contexto visual da imagem, personagens, frame, poster, screenshot de rede social e qualquer texto visivel. "
+            "Se houver texto, cruze o texto com o contexto visual para encontrar o titulo original mais provavel. "
+            "Se houver varias possibilidades plausiveis para o mesmo contexto, nao invente certeza: coloque a melhor em detected_title "
+            "e preencha alt_titles com as outras opcoes mais provaveis para eu poder pedir confirmacao ao usuario. "
+            "Retorne JSON apenas com as chaves: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
+            "media_type deve ser movie, series ou unknown. "
+            "confidence deve ficar entre 0 e 1."
             + ocr_hint_text
         )
         parsed, query_attempts = await self._query_candidate(image_b64, prompt, use_json_mode=True)
@@ -342,12 +347,17 @@ class OpenRouterClient:
         if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
             return parsed
 
+        assertive_candidate, assertive_attempts = await self._query_assertive_text_candidate(image_bytes, ocr_hint)
+        attempts.extend(assertive_attempts)
+        if assertive_candidate.detected_title and assertive_candidate.confidence >= 0.7:
+            return assertive_candidate
+
         ocr_prompt = (
-            "Read the visible text in this image and use it to infer the movie or TV series title. "
-            "Return JSON only with keys: detected_title, media_type, year, confidence, alt_titles, "
-            "visible_text, need_clarification. "
-            "If the title is explicitly written in the image, copy it to detected_title and use confidence >= 0.9. "
-            "visible_text must contain the main readable text lines from the image."
+            "Leia o texto visivel na imagem e use esse texto junto com o contexto visual para inferir o titulo ORIGINAL do filme ou da serie. "
+            "Se o titulo estiver escrito na imagem, copie o titulo original em detected_title. "
+            "Se houver mais de uma opcao plausivel, preencha alt_titles com as melhores alternativas. "
+            "Retorne JSON apenas com as chaves: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
+            "visible_text deve conter as principais linhas legiveis da imagem."
         )
         parsed, query_attempts = await self._query_candidate(image_b64, ocr_prompt, use_json_mode=False)
         attempts.extend(query_attempts)
@@ -381,14 +391,14 @@ class OpenRouterClient:
         return [compact_text(str(review), 260) for review in reviews if str(review).strip()][:3]
 
     async def translate_reviews_to_pt_br(self, reviews: list[str], *, title: str | None = None) -> list[str]:
-        cleaned = [compact_text(str(review), 1200) for review in reviews if str(review).strip()]
+        cleaned = [" ".join(str(review).split()) for review in reviews if str(review).strip()]
         if not cleaned:
             return []
         prompt = (
             "Converta as reviews abaixo para portugues brasileiro natural. "
             "Se ja estiverem em portugues, normalize para pt-BR. "
             "Preserve o sentido, remova markdown desnecessario e retorne JSON puro no formato "
-            "{\"reviews\":[\"...\",\"...\"]}. Mantenha a mesma quantidade de reviews recebida.\n\n"
+            "{\"reviews\":[\"...\",\"...\"]}. Mantenha a mesma quantidade de reviews recebida e nao resuma nem corte o texto.\n\n"
             f"Titulo: {title or 'desconhecido'}\n"
             f"Reviews: {cleaned}"
         )
@@ -396,7 +406,7 @@ class OpenRouterClient:
         translated = data.get("reviews") if isinstance(data, dict) else []
         if not isinstance(translated, list):
             return cleaned
-        normalized = [compact_text(str(review), 1200) for review in translated if str(review).strip()]
+        normalized = [" ".join(str(review).split()) for review in translated if str(review).strip()]
         return normalized[: len(cleaned)] or cleaned
 
     def _identify_title_from_ocr(self, image_bytes: bytes) -> VisionCandidate | None:
@@ -442,6 +452,14 @@ class OpenRouterClient:
                     confidence=0.9,
                     visible_text=[*lines, f"ocr_variant={variant_name}"],
                 )
+            contextual_title = self._extract_title_from_context_lines(lines)
+            if contextual_title:
+                return VisionCandidate(
+                    detected_title=contextual_title,
+                    media_type="unknown",
+                    confidence=0.84,
+                    visible_text=[*lines, f"ocr_variant={variant_name}"],
+                )
         return None
 
     def _should_return_ocr_candidate(self, candidate: VisionCandidate) -> bool:
@@ -481,6 +499,20 @@ class OpenRouterClient:
                 lower_large = lower_gray.resize((max(lower_crop.width * 2, 1), max(lower_crop.height * 2, 1)))
                 lower_sharp = ImageEnhance.Contrast(lower_large).enhance(2.8).filter(ImageFilter.SHARPEN)
                 variants.append(("bottom-crop-contrast", self._encode_image_variant(lower_sharp)))
+
+                center_crop = image.crop((int(width * 0.18), int(height * 0.10), int(width * 0.82), int(height * 0.86)))
+                center_gray = ImageOps.autocontrast(ImageOps.grayscale(center_crop))
+                center_large = center_gray.resize((max(center_crop.width * 2, 1), max(center_crop.height * 2, 1)))
+                center_sharp = ImageEnhance.Contrast(center_large).enhance(2.6).filter(ImageFilter.SHARPEN)
+                variants.append(("center-crop-contrast", self._encode_image_variant(center_sharp)))
+
+                poster_title_crop = image.crop((int(width * 0.22), int(height * 0.46), int(width * 0.78), int(height * 0.80)))
+                poster_title_gray = ImageOps.autocontrast(ImageOps.grayscale(poster_title_crop))
+                poster_title_large = poster_title_gray.resize(
+                    (max(poster_title_crop.width * 3, 1), max(poster_title_crop.height * 3, 1))
+                )
+                poster_title_sharp = ImageEnhance.Contrast(poster_title_large).enhance(3.0).filter(ImageFilter.SHARPEN)
+                variants.append(("poster-title-crop", self._encode_image_variant(poster_title_sharp)))
         except Exception:
             return variants
         return variants
@@ -549,6 +581,11 @@ class OpenRouterClient:
             "COMMENT",
             "COMENTARIO",
             "COMENTÁRIO",
+            "ASSINAR",
+            "CURTIDAS",
+            "COMENTARIOS",
+            "COMENTÁRIOS",
+            "FINAL DE SEMANA",
         }
         best_line: str | None = None
         best_score = 0.0
@@ -589,13 +626,50 @@ class OpenRouterClient:
             score = float(entry.get("score") or 0.0)
             score += uppercase_ratio
             score += 0.2 if len(words) in {2, 3} else 0.0
-            score += 0.2 if y_center >= 350 else 0.0
+            score += 0.25 if 180 <= y_center <= 780 else 0.0
+            score -= 0.35 if y_center >= 900 else 0.0
             score += min(len(cleaned) / 20, 0.4)
             if score <= best_score:
                 continue
             best_score = score
             best_line = cleaned.title() if cleaned.isupper() else cleaned
         return best_line
+
+    def _extract_title_from_context_lines(self, lines: list[str]) -> str | None:
+        removable_trailing_words = {"main", "official", "audio", "trailer", "teaser", "scene", "clip", "edit"}
+        best_candidate: str | None = None
+        best_score = 0.0
+        for raw_line in lines:
+            cleaned_line = " ".join(str(raw_line).replace("|", "-").split())
+            if not cleaned_line:
+                continue
+            for fragment_index, fragment in enumerate(re.split(r"[-:/]", cleaned_line)):
+                normalized = " ".join(fragment.split()).strip(" -")
+                if not normalized or len(normalized) < 4:
+                    continue
+                words = normalized.split()
+                while words and words[-1].casefold() in removable_trailing_words:
+                    words.pop()
+                if not 1 <= len(words) <= 4:
+                    continue
+                candidate = " ".join(words)
+                letters = [char for char in candidate if char.isalpha()]
+                if len(letters) < 4:
+                    continue
+                if candidate.isupper():
+                    score = 1.2
+                elif candidate.istitle():
+                    score = 1.0
+                else:
+                    continue
+                score += fragment_index * 0.18
+                if len(words) in {2, 3}:
+                    score += 0.2
+                if score <= best_score:
+                    continue
+                best_score = score
+                best_candidate = candidate.title() if candidate.isupper() else candidate
+        return best_candidate
 
     def _build_llm_vision_variants(self, image_bytes: bytes) -> list[tuple[str, bytes]]:
         variants = [("original", image_bytes)]
@@ -634,9 +708,10 @@ class OpenRouterClient:
         visible_text = ", ".join(ocr_hint.visible_text[:8]) if ocr_hint and ocr_hint.visible_text else "sem OCR util"
         hint_title = ocr_hint.detected_title if ocr_hint and ocr_hint.detected_title else "sem palpite"
         prompt = (
-            "Voce esta analisando um frame dificil de filme ou serie, possivelmente uma foto de tela com legenda. "
-            "Use rosto, figurino, cinematografia, nomes na legenda e qualquer texto visivel para inferir o titulo mais provavel. "
+            "Voce esta analisando um frame dificil de filme ou serie, possivelmente uma foto de tela com legenda ou interface social. "
+            "Use rosto, figurino, cinematografia, nomes escritos, titulo sobreposto e qualquer texto visivel para inferir o TITULO ORIGINAL mais provavel. "
             "Retorne JSON apenas com: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
+            "Se houver varias opcoes plausiveis, coloque as alternativas em alt_titles e marque need_clarification=true. "
             "Se houver um palpite plausivel, retorne-o mesmo com confianca moderada; nao invente certeza.\n\n"
             f"Palpite OCR: {hint_title}\n"
             f"Texto OCR visivel: {visible_text}\n"
@@ -657,6 +732,76 @@ class OpenRouterClient:
             if candidate.detected_title:
                 return candidate, attempts
         return VisionCandidate(), attempts
+
+    async def _query_assertive_text_candidate(
+        self,
+        image_bytes: bytes,
+        ocr_hint: VisionCandidate | None,
+    ) -> tuple[VisionCandidate, list[str]]:
+        preferred_models = list(
+            dict.fromkeys(
+                [
+                    model
+                    for model in [
+                        "google/gemini-3-flash-preview",
+                        "google/gemini-2.5-pro",
+                        "google/gemini-2.5-flash",
+                        "openai/gpt-4.1-mini",
+                        *self.settings.openrouter_paid_vision_models,
+                    ]
+                    if model
+                ]
+            )
+        )
+        if not preferred_models:
+            return VisionCandidate(), []
+        hint_title = ocr_hint.detected_title if ocr_hint and ocr_hint.detected_title else "sem palpite"
+        hint_text = ", ".join(ocr_hint.visible_text[:8]) if ocr_hint and ocr_hint.visible_text else "sem OCR util"
+        prompt = (
+            "A imagem em anexo representa algum filme ou serie e provavelmente contem pistas textuais fortes. "
+            "Leia o texto visivel com precisao, normalize espacos quebrados e cruze esse texto com o contexto visual para encontrar o TITULO ORIGINAL. "
+            "Priorize texto explicito e contexto visual acima de popularidade. "
+            "Se houver mais de uma opcao plausivel, use alt_titles para listar as melhores opcoes e marque need_clarification=true. "
+            "Retorne JSON apenas com: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification.\n\n"
+            f"Palpite OCR: {hint_title}\n"
+            f"Texto OCR visivel: {hint_text}\n"
+        )
+        attempts: list[str] = []
+        for variant_name, variant_bytes in self._build_llm_vision_variants(image_bytes):
+            variant_b64 = base64.b64encode(variant_bytes).decode("ascii")
+            candidate, variant_attempts = await self._query_candidate(
+                variant_b64,
+                prompt,
+                use_json_mode=True,
+                models=preferred_models,
+            )
+            attempts.extend([f"assertive::{variant_name}::{attempt}" for attempt in variant_attempts])
+            if candidate.detected_title:
+                return candidate, attempts
+        return VisionCandidate(), attempts
+
+    async def refine_title_from_user_feedback(
+        self,
+        selection: str,
+        options: list[dict[str, Any]],
+    ) -> VisionCandidate:
+        options_payload = json.dumps(options, ensure_ascii=True)
+        prompt = (
+            "O usuario respondeu para desambiguar o titulo de um filme ou serie. "
+            "Sua tarefa e descobrir o TITULO ORIGINAL exato a partir da resposta do usuario e das opcoes candidatas. "
+            "Se o usuario escolheu um numero, mapeie para a opcao correta. "
+            "Se o usuario escreveu um nome parcial ou traduzido, normalize para o titulo original mais provavel. "
+            "Retorne JSON apenas com: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification.\n\n"
+            f"Resposta do usuario: {selection}\n"
+            f"Opcoes candidatas: {options_payload}\n"
+        )
+        data = await self._run_text_json_task(prompt) or {}
+        if not data:
+            return VisionCandidate()
+        try:
+            return VisionCandidate.model_validate(data)
+        except Exception:
+            return VisionCandidate()
 
     async def _query_candidate(
         self,
@@ -802,6 +947,8 @@ class TMDbClient:
             reviews = [content for _, content in scored_reviews[:3]]
             return EnrichedMedia(
                 title=payload.get("title") or payload.get("name") or candidate.detected_title or "Unknown",
+                original_title=payload.get("original_title") or payload.get("original_name") or payload.get("title") or payload.get("name"),
+                localized_title=payload.get("title") or payload.get("name") or candidate.detected_title or "Unknown",
                 media_type=media_type,
                 year=int((payload.get("release_date") or payload.get("first_air_date") or "0000")[:4])
                 if (payload.get("release_date") or payload.get("first_air_date"))
@@ -826,6 +973,16 @@ class TMDbClient:
         ]
         if len(exact_matches) == 1:
             return exact_matches[0]
+        near_year_matches = [
+            result
+            for _, result in scored
+            if self._is_exact_title_match(candidate.detected_title, result) and self._is_near_year_match(candidate.year, result)
+        ]
+        if len(near_year_matches) == 1:
+            return near_year_matches[0]
+        exact_title_matches = [result for _, result in scored if self._is_exact_title_match(candidate.detected_title, result)]
+        if len(exact_title_matches) == 1:
+            return exact_title_matches[0]
         self._raise_for_ambiguity(scored)
         return scored[0][1]
 
@@ -846,6 +1003,14 @@ class TMDbClient:
             return False
         result_year = (result.get("release_date") or result.get("first_air_date") or "")[:4]
         return result_year == str(candidate_year)
+
+    def _is_near_year_match(self, candidate_year: int | None, result: dict[str, Any]) -> bool:
+        if not candidate_year:
+            return False
+        result_year = (result.get("release_date") or result.get("first_air_date") or "")[:4]
+        if not result_year.isdigit():
+            return False
+        return abs(int(result_year) - candidate_year) <= 1
 
     def _raise_for_ambiguity(self, scored: list[tuple[float, dict[str, Any]]]) -> None:
         if len(scored) < 2:
@@ -875,6 +1040,52 @@ class OMDbClient:
     def __init__(self, settings: Settings) -> None:
         self.settings = settings
 
+    async def search_and_enrich(self, candidate: VisionCandidate) -> EnrichedMedia:
+        params: dict[str, str] = {
+            "apikey": self.settings.omdb_api_key,
+            "plot": "full",
+            "t": candidate.detected_title or "",
+        }
+        if candidate.year:
+            params["y"] = str(candidate.year)
+        if candidate.media_type == "movie":
+            params["type"] = "movie"
+        elif candidate.media_type == "series":
+            params["type"] = "series"
+        async with httpx.AsyncClient(base_url="https://www.omdbapi.com", timeout=30.0) as client:
+            response = await client.get("/", params=params)
+            response.raise_for_status()
+            payload = response.json()
+        if payload.get("Response") != "True":
+            raise HTTPException(status_code=404, detail="No OMDb match found.")
+        ratings: dict[str, str] = {}
+        imdb_rating = str(payload.get("imdbRating") or "").strip()
+        if imdb_rating and imdb_rating != "N/A":
+            ratings["IMDb"] = f"{imdb_rating}/10"
+        for rating in payload.get("Ratings", []) if isinstance(payload.get("Ratings"), list) else []:
+            source = str(rating.get("Source") or "").strip()
+            value = str(rating.get("Value") or "").strip()
+            if source and value:
+                ratings[source] = value
+        media_type = "series" if str(payload.get("Type") or "").lower() == "series" else "movie"
+        genres = [part.strip() for part in str(payload.get("Genre") or "").split(",") if part.strip() and part.strip() != "N/A"]
+        return EnrichedMedia(
+            title=str(payload.get("Title") or candidate.detected_title or "Unknown"),
+            original_title=str(payload.get("Title") or candidate.detected_title or "Unknown"),
+            localized_title=str(payload.get("Title") or candidate.detected_title or "Unknown"),
+            media_type=media_type,
+            year=int(str(payload.get("Year") or "0")[:4]) if str(payload.get("Year") or "")[:4].isdigit() else candidate.year,
+            imdb_id=str(payload.get("imdbID") or "") or None,
+            release_date=str(payload.get("Released") or "") or None,
+            overview=compact_text(str(payload.get("Plot") or ""), 1200),
+            genres=genres,
+            ratings=ratings,
+            providers=[],
+            reviews=[],
+            confidence=candidate.confidence,
+            payload={"source": "omdb", "omdb": payload},
+        )
+
     async def attach_ratings(self, enriched: EnrichedMedia) -> EnrichedMedia:
         if not enriched.imdb_id:
             return enriched
@@ -894,6 +1105,98 @@ class OMDbClient:
                 ratings["Metacritic"] = value
         enriched.ratings = ratings
         return enriched
+
+
+class IMDbReviewClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    async def fetch_reviews(self, imdb_id: str) -> list[str]:
+        url = f"https://www.imdb.com/title/{imdb_id}/reviews/"
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if response.status_code >= 400 or "x-amzn-waf-action" in response.headers:
+            return []
+        html = response.text
+        if "review-container" not in html and "user-review-card" not in html:
+            return []
+        snippets = re.findall(r'<div[^>]+class="[^"]*(?:review-container|user-review-card)[^"]*"[^>]*>(.*?)</div>\s*</div>', html, re.DOTALL)
+        results: list[str] = []
+        for snippet in snippets:
+            text = self._clean_html(snippet)
+            if text and len(text) >= 80 and text not in results:
+                results.append(text)
+            if len(results) == 3:
+                break
+        return results
+
+    def _clean_html(self, html: str) -> str:
+        text = re.sub(r"<script.*?</script>", " ", html, flags=re.DOTALL)
+        text = re.sub(r"<style.*?</style>", " ", text, flags=re.DOTALL)
+        text = re.sub(r"<[^>]+>", " ", text)
+        text = unescape(" ".join(text.split()))
+        return text.strip()
+
+
+class LetterboxdReviewClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+
+    async def fetch_reviews(self, title: str) -> list[str]:
+        slug = self._slugify(title)
+        if not slug:
+            return []
+        url = f"https://letterboxd.com/film/{slug}/"
+        async with httpx.AsyncClient(timeout=30.0, follow_redirects=True) as client:
+            response = await client.get(url, headers={"User-Agent": "Mozilla/5.0"})
+        if response.status_code >= 400:
+            return []
+        html = response.text
+        if "js-review-body" not in html:
+            return []
+        blocks = re.findall(
+            r'<div class="body-text -prose -reset js-review-body js-collapsible-text"(?P<attrs>[^>]*)>(?P<body>.*?)</div>',
+            html,
+            re.DOTALL,
+        )
+        reviews: list[str] = []
+        for attrs, body in blocks:
+            if "data-full-text-url" in attrs and 'class="collapsed-text"' in body:
+                continue
+            text = self._clean_html(body)
+            if text and text not in reviews:
+                reviews.append(text)
+            if len(reviews) == 3:
+                break
+        return reviews
+
+    def _slugify(self, title: str) -> str:
+        normalized = unescape(title).casefold()
+        normalized = re.sub(r"[^a-z0-9]+", "-", normalized)
+        return normalized.strip("-")
+
+    def _clean_html(self, html: str) -> str:
+        text = re.sub(r"<[^>]+>", " ", html)
+        text = unescape(" ".join(text.split()))
+        return text.strip()
+
+
+class ReviewSourceClient:
+    def __init__(self, settings: Settings) -> None:
+        self.settings = settings
+        self.letterboxd = LetterboxdReviewClient(settings)
+        self.imdb = IMDbReviewClient(settings)
+
+    async def fetch_reviews(self, enriched: EnrichedMedia) -> list[str]:
+        if enriched.media_type == "movie":
+            letterboxd_reviews = await self.letterboxd.fetch_reviews(enriched.title)
+            if letterboxd_reviews:
+                return letterboxd_reviews
+        if enriched.imdb_id:
+            imdb_reviews = await self.imdb.fetch_reviews(enriched.imdb_id)
+            if imdb_reviews:
+                return imdb_reviews
+        return []
 
 
 class TraktClient:

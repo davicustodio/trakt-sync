@@ -71,10 +71,10 @@ class Settings(BaseSettings):
     openrouter_enable_paid_fallback: bool = True
     openrouter_paid_vision_models: list[str] = Field(
         default_factory=lambda: [
-            "google/gemini-2.5-flash-lite",
+            "google/gemini-3-flash-preview",
+            "google/gemini-2.5-pro",
             "google/gemini-2.5-flash",
             "openai/gpt-4.1-mini",
-            "google/gemini-2.5-pro",
         ]
     )
     openrouter_emergency_router: str = "openrouter/free"

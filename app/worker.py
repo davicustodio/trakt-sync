@@ -29,15 +29,50 @@ async def process_x_info(_: dict, chat_jid: str, requester_phone: str, trigger_m
                 before_received_at = command_message.received_at
             message = await service.find_latest_image(chat_jid, requester_phone, before_received_at=before_received_at)
             enriched = await pipeline.enrich_from_image(message.provider_message_id, message.media_url)
-            await service.save_identified_media(message, enriched)
+            identified = await service.save_identified_media(message, enriched)
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_whatsapp_reply(enriched))
             for review_message in await pipeline.format_review_messages(enriched):
                 await pipeline.evolution.send_text(chat_jid, review_message)
+            await service.store_pending_identification(
+                chat_jid,
+                requester_phone,
+                pipeline.build_pending_watchlist_confirmation(
+                    channel="whatsapp",
+                    identified_media_id=getattr(identified, "id", None),
+                ),
+            )
+            await pipeline.evolution.send_text(chat_jid, await pipeline.format_watchlist_question(enriched))
         except AmbiguousTitleError as exc:
+            await service.store_pending_identification(
+                chat_jid,
+                requester_phone,
+                pipeline.build_pending_options(
+                    exc.options,
+                    channel="whatsapp",
+                    image_message_id=getattr(message, "id", None) if "message" in locals() else None,
+                ),
+            )
             await pipeline.evolution.send_text(chat_jid, await pipeline.format_ambiguous_reply(exc.options))
         except VisionIdentificationError as exc:
-            await pipeline.evolution.send_text(chat_jid, _format_x_info_failure(exc))
+            await service.store_pending_identification(
+                chat_jid,
+                requester_phone,
+                pipeline.build_pending_manual_input(
+                    channel="whatsapp",
+                    image_message_id=getattr(message, "id", None) if "message" in locals() else None,
+                    attempts=exc.attempts,
+                ),
+            )
+            await pipeline.evolution.send_text(chat_jid, await pipeline.format_manual_help_reply(exc.attempts))
         except Exception as exc:  # noqa: BLE001
+            await service.store_pending_identification(
+                chat_jid,
+                requester_phone,
+                pipeline.build_pending_manual_input(
+                    channel="whatsapp",
+                    image_message_id=getattr(message, "id", None) if "message" in locals() else None,
+                ),
+            )
             await pipeline.evolution.send_text(chat_jid, _format_x_info_failure(exc))
 
 
@@ -68,10 +103,68 @@ async def process_x_save(_: dict, chat_jid: str, requester_phone: str) -> None:
             if not enriched.tmdb_id and not enriched.imdb_id:
                 raise ValueError("Titulo identificado sem IDs externos para salvar no Trakt.")
             await pipeline.trakt.add_to_watchlist(access_token, enriched)
+            await service.clear_pending_identification(chat_jid, requester_phone)
             await db.commit()
             await pipeline.evolution.send_text(chat_jid, f"{identified.title} foi salvo na sua watchlist do Trakt.")
         except Exception as exc:  # noqa: BLE001
             await pipeline.evolution.send_text(chat_jid, f"Falha ao salvar no Trakt: {exc}")
+
+
+async def process_x_info_confirmation(_: dict, chat_jid: str, requester_phone: str, selection: str) -> None:
+    settings = get_settings()
+    pipeline = PipelineService(settings)
+    async with SessionLocal() as db:
+        service = MessageService(settings, db)
+        pending = await service.get_pending_identification(chat_jid, requester_phone)
+        if pending is None:
+            await pipeline.evolution.send_text(chat_jid, "Nao ha nenhuma identificacao pendente para confirmar.")
+            return
+        try:
+            enriched = await pipeline.enrich_from_user_confirmation(selection, pending)
+            source_message = None
+            if pending.image_message_id:
+                source_message = await service.get_message_by_id(pending.image_message_id)
+            if source_message is not None:
+                identified = await service.save_identified_media(source_message, enriched)
+            else:
+                identified = None
+                await service.clear_pending_identification(chat_jid, requester_phone)
+            await pipeline.evolution.send_text(chat_jid, await pipeline.format_whatsapp_reply(enriched))
+            for review_message in await pipeline.format_review_messages(enriched):
+                await pipeline.evolution.send_text(chat_jid, review_message)
+            await service.store_pending_identification(
+                chat_jid,
+                requester_phone,
+                pipeline.build_pending_watchlist_confirmation(
+                    channel="whatsapp",
+                    identified_media_id=getattr(identified, "id", None),
+                ),
+            )
+            await pipeline.evolution.send_text(chat_jid, await pipeline.format_watchlist_question(enriched))
+        except (AmbiguousTitleError, HTTPException, ValueError):
+            await pipeline.evolution.send_text(chat_jid, await pipeline.format_confirmation_retry_reply())
+        except Exception as exc:  # noqa: BLE001
+            await pipeline.evolution.send_text(chat_jid, _format_x_info_failure(exc))
+
+
+async def process_x_watchlist_reply(_: dict, chat_jid: str, requester_phone: str, selection: str) -> None:
+    settings = get_settings()
+    pipeline = PipelineService(settings)
+    async with SessionLocal() as db:
+        service = MessageService(settings, db)
+        pending = await service.get_pending_identification(chat_jid, requester_phone)
+        if pending is None or pending.mode != "watchlist-confirmation":
+            await pipeline.evolution.send_text(chat_jid, "Nao ha nenhuma pergunta pendente sobre a watchlist.")
+            return
+        decision = selection.strip().casefold()
+        if decision in {"sim", "s", "yes", "y", "save", "salvar"}:
+            await process_x_save({}, chat_jid, requester_phone)
+            return
+        if decision in {"nao", "não", "n", "no", "cancelar", "ignorar"}:
+            await service.clear_pending_identification(chat_jid, requester_phone)
+            await pipeline.evolution.send_text(chat_jid, await pipeline.format_watchlist_declined())
+            return
+        await pipeline.evolution.send_text(chat_jid, await pipeline.format_watchlist_retry())
 
 
 async def _telegram_update_status(pipeline: PipelineService, chat_id: str, status_message_id: int | None, text: str) -> None:
@@ -150,7 +243,7 @@ async def process_telegram_x_info(
                 "[x-info] Etapa 5/6: consolidando catalogo, ratings e provedores.",
                 action="typing",
             )
-            await service.save_identified_media(message, enriched)
+            identified = await service.save_identified_media(message, enriched)
             await _telegram_send_stage(
                 pipeline,
                 chat_id,
@@ -162,8 +255,26 @@ async def process_telegram_x_info(
                 await pipeline.telegram.send_text(chat_id, await pipeline.format_media_reply(enriched))
                 for review_message in await pipeline.format_review_messages(enriched):
                     await pipeline.telegram.send_text(chat_id, review_message)
+                await service.store_pending_identification(
+                    chat_id,
+                    requester_key,
+                    pipeline.build_pending_watchlist_confirmation(
+                        channel="telegram",
+                        identified_media_id=getattr(identified, "id", None),
+                    ),
+                )
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_watchlist_question(enriched))
                 await _telegram_update_status(pipeline, chat_id, status_message_id, "[x-info] Concluido com sucesso.")
         except AmbiguousTitleError as exc:
+            await service.store_pending_identification(
+                chat_id,
+                requester_key,
+                pipeline.build_pending_options(
+                    exc.options,
+                    channel="telegram",
+                    image_message_id=getattr(message, "id", None) if "message" in locals() else None,
+                ),
+            )
             await _telegram_update_status(
                 pipeline,
                 chat_id,
@@ -172,6 +283,24 @@ async def process_telegram_x_info(
             )
             if pipeline.telegram is not None:
                 await pipeline.telegram.send_text(chat_id, await pipeline.format_ambiguous_reply(exc.options))
+        except VisionIdentificationError as exc:
+            await service.store_pending_identification(
+                chat_id,
+                requester_key,
+                pipeline.build_pending_manual_input(
+                    channel="telegram",
+                    image_message_id=getattr(message, "id", None) if "message" in locals() else None,
+                    attempts=exc.attempts,
+                ),
+            )
+            await _telegram_update_status(
+                pipeline,
+                chat_id,
+                status_message_id,
+                "[x-info] Falha durante o processamento.",
+            )
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_manual_help_reply(exc.attempts))
         except Exception as exc:  # noqa: BLE001
             await _telegram_update_status(
                 pipeline,
@@ -181,6 +310,70 @@ async def process_telegram_x_info(
             )
             if pipeline.telegram is not None:
                 await pipeline.telegram.send_text(chat_id, _format_x_info_failure(exc))
+
+
+async def process_telegram_x_info_confirmation(_: dict, chat_id: str, requester_key: str, selection: str) -> None:
+    settings = get_settings()
+    pipeline = PipelineService(settings)
+    async with SessionLocal() as db:
+        service = MessageService(settings, db)
+        pending = await service.get_pending_identification(chat_id, requester_key)
+        if pending is None:
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, "Nao ha nenhuma identificacao pendente para confirmar.")
+            return
+        try:
+            enriched = await pipeline.enrich_from_user_confirmation(selection, pending)
+            source_message = None
+            if pending.image_message_id:
+                source_message = await service.get_message_by_id(pending.image_message_id)
+            if source_message is not None:
+                identified = await service.save_identified_media(source_message, enriched)
+            else:
+                identified = None
+                await service.clear_pending_identification(chat_id, requester_key)
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_media_reply(enriched))
+                for review_message in await pipeline.format_review_messages(enriched):
+                    await pipeline.telegram.send_text(chat_id, review_message)
+                await service.store_pending_identification(
+                    chat_id,
+                    requester_key,
+                    pipeline.build_pending_watchlist_confirmation(
+                        channel="telegram",
+                        identified_media_id=getattr(identified, "id", None),
+                    ),
+                )
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_watchlist_question(enriched))
+        except (AmbiguousTitleError, HTTPException, ValueError):
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_confirmation_retry_reply())
+        except Exception as exc:  # noqa: BLE001
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, _format_x_info_failure(exc))
+
+
+async def process_telegram_watchlist_reply(_: dict, chat_id: str, requester_key: str, selection: str) -> None:
+    settings = get_settings()
+    pipeline = PipelineService(settings)
+    async with SessionLocal() as db:
+        service = MessageService(settings, db)
+        pending = await service.get_pending_identification(chat_id, requester_key)
+        if pending is None or pending.mode != "watchlist-confirmation":
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, "Nao ha nenhuma pergunta pendente sobre a watchlist.")
+            return
+        decision = selection.strip().casefold()
+        if decision in {"sim", "s", "yes", "y", "save", "salvar"}:
+            await process_telegram_x_save({}, chat_id, requester_key)
+            return
+        if decision in {"nao", "não", "n", "no", "cancelar", "ignorar"}:
+            await service.clear_pending_identification(chat_id, requester_key)
+            if pipeline.telegram is not None:
+                await pipeline.telegram.send_text(chat_id, await pipeline.format_watchlist_declined())
+            return
+        if pipeline.telegram is not None:
+            await pipeline.telegram.send_text(chat_id, await pipeline.format_watchlist_retry())
 
 
 async def process_telegram_x_save(
@@ -234,6 +427,7 @@ async def process_telegram_x_save(
                 action="typing",
             )
             await pipeline.trakt.add_to_watchlist(access_token, enriched)
+            await service.clear_pending_identification(chat_id, requester_key)
             await db.commit()
             if pipeline.telegram is not None:
                 await pipeline.telegram.send_text(chat_id, f"{identified.title} foi salvo na sua watchlist do Trakt.")
@@ -248,7 +442,7 @@ def _format_x_info_failure(exc: Exception) -> str:
     if isinstance(exc, VisionIdentificationError):
         attempts = exc.attempts[:6]
         lines = [
-            "Falha ao analisar a imagem para o x-info.",
+            "Falha ao analisar a imagem.",
             f"Motivo: {exc.reason}",
         ]
         if attempts:
@@ -256,13 +450,13 @@ def _format_x_info_failure(exc: Exception) -> str:
         lines.extend(
             [
                 "",
-                "Se esta imagem for um print do Instagram/WhatsApp, envie uma captura mais fechada no poster ou frame.",
+                "Se esta imagem for uma captura do Telegram ou Instagram, envie um recorte mais fechado no poster ou no frame principal.",
             ]
         )
         return "\n".join(lines)
     if isinstance(exc, HTTPException):
-        return f"Falha ao analisar a imagem para o x-info. Motivo: {exc.detail}"
-    return f"Falha ao analisar a imagem para o x-info. Motivo: {exc}"
+        return f"Falha ao analisar a imagem. Motivo: {exc.detail}"
+    return f"Falha ao analisar a imagem. Motivo: {exc}"
 
 
 def _build_trakt_connect_message(settings, requester_phone: str, reason: str) -> str:

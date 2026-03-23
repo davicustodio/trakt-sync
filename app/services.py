@@ -3,15 +3,16 @@ from __future__ import annotations
 from datetime import UTC, datetime, timedelta
 from typing import Any
 from dataclasses import dataclass
+import re
 
 from fastapi import HTTPException
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.clients import EvolutionClient, OMDbClient, OpenRouterClient, TMDbClient, TelegramClient, TraktClient
+from app.clients import EvolutionClient, OMDbClient, OpenRouterClient, ReviewSourceClient, TMDbClient, TelegramClient, TraktClient
 from app.config import Settings
 from app.models import ChatState, IdentifiedMedia, IncomingMessage, PhoneProfile, TraktConnection
-from app.schemas import EnrichedMedia, NormalizedMessage
+from app.schemas import EnrichedMedia, NormalizedMessage, PendingIdentificationState, VisionCandidate
 
 
 @dataclass(slots=True)
@@ -84,6 +85,12 @@ class MessageService:
             raise HTTPException(status_code=404, detail="Command message not found.")
         return message
 
+    async def get_message_by_id(self, message_id: int) -> IncomingMessage:
+        message = await self.db.get(IncomingMessage, message_id)
+        if not message:
+            raise HTTPException(status_code=404, detail="Source image message not found.")
+        return message
+
     async def find_latest_image(
         self,
         chat_jid: str,
@@ -128,13 +135,18 @@ class MessageService:
             year=enriched.year,
             confidence=enriched.confidence,
             overview=enriched.overview,
-            payload=enriched.payload,
+            payload={
+                **(enriched.payload or {}),
+                "original_title": enriched.original_title,
+                "localized_title": enriched.localized_title,
+            },
         )
         self.db.add(identified)
         await self.db.flush()
         result = await self.db.execute(select(ChatState).where(ChatState.chat_jid == message.chat_jid))
         state = result.scalar_one()
         state.last_identified_media_id = identified.id
+        state.pending_identification = None
         await self.db.commit()
         return identified
 
@@ -152,6 +164,58 @@ class MessageService:
             raise HTTPException(status_code=404, detail="No identified title is available yet.")
         return identified
 
+    async def store_pending_identification(
+        self,
+        chat_jid: str,
+        requester_phone: str,
+        pending: PendingIdentificationState,
+    ) -> None:
+        result = await self.db.execute(select(ChatState).where(ChatState.chat_jid == chat_jid))
+        state = result.scalar_one_or_none()
+        if state is None:
+            state = ChatState(chat_jid=chat_jid, requester_phone=requester_phone)
+            self.db.add(state)
+            await self.db.flush()
+        state.requester_phone = requester_phone
+        state.pending_identification = pending.model_dump()
+        await self.db.commit()
+
+    async def get_pending_identification(
+        self,
+        chat_jid: str,
+        requester_phone: str | None = None,
+    ) -> PendingIdentificationState | None:
+        if not hasattr(self.db, "execute"):
+            return None
+        try:
+            result = await self.db.execute(select(ChatState).where(ChatState.chat_jid == chat_jid))
+            state = result.scalar_one_or_none()
+            pending = getattr(state, "pending_identification", None) if state is not None else None
+            if pending:
+                return PendingIdentificationState.model_validate(pending)
+            if requester_phone:
+                result = await self.db.execute(select(ChatState).where(ChatState.requester_phone == requester_phone))
+                state = result.scalar_one_or_none()
+                pending = getattr(state, "pending_identification", None) if state is not None else None
+                if pending:
+                    return PendingIdentificationState.model_validate(pending)
+        except Exception:
+            return None
+        return None
+
+    async def clear_pending_identification(self, chat_jid: str, requester_phone: str | None = None) -> None:
+        if not hasattr(self.db, "execute"):
+            return
+        result = await self.db.execute(select(ChatState).where(ChatState.chat_jid == chat_jid))
+        state = result.scalar_one_or_none()
+        if state is None and requester_phone:
+            result = await self.db.execute(select(ChatState).where(ChatState.requester_phone == requester_phone))
+            state = result.scalar_one_or_none()
+        if state is None:
+            return
+        state.pending_identification = None
+        await self.db.commit()
+
 
 class PipelineService:
     def __init__(self, settings: Settings) -> None:
@@ -161,6 +225,7 @@ class PipelineService:
         self.openrouter = OpenRouterClient(settings)
         self.tmdb = TMDbClient(settings)
         self.omdb = OMDbClient(settings)
+        self.reviews = ReviewSourceClient(settings)
         self.trakt = TraktClient(settings)
 
     def messaging_for(self, channel: str):
@@ -200,14 +265,60 @@ class PipelineService:
         except HTTPException as exc:
             if exc.status_code != 404:
                 raise
-            enriched = EnrichedMedia(
-                title=candidate.detected_title or "Titulo nao confirmado",
-                media_type="series" if candidate.media_type == "series" else "movie",
-                year=candidate.year,
-                confidence=candidate.confidence,
-                overview="Identificacao parcial: nao consegui confirmar o catalogo no TMDb.",
-                payload={"fallback": "vision-only", "visible_text": candidate.visible_text, "alt_titles": candidate.alt_titles},
+            try:
+                enriched = await self.omdb.search_and_enrich(candidate)
+            except HTTPException:
+                enriched = EnrichedMedia(
+                    title=candidate.detected_title or "Titulo nao confirmado",
+                    original_title=candidate.detected_title,
+                    localized_title=candidate.detected_title,
+                    media_type="series" if candidate.media_type == "series" else "movie",
+                    year=candidate.year,
+                    confidence=candidate.confidence,
+                    overview="Identificacao parcial: nao consegui confirmar o catalogo nem no TMDb nem no IMDb/OMDb.",
+                    payload={
+                        "fallback": "vision-only",
+                        "visible_text": candidate.visible_text,
+                        "alt_titles": candidate.alt_titles,
+                    },
+                )
+        return await self.omdb.attach_ratings(enriched)
+
+    async def enrich_from_user_confirmation(
+        self,
+        selection: str,
+        pending: PendingIdentificationState,
+    ) -> EnrichedMedia:
+        refined = await self.openrouter.refine_title_from_user_feedback(selection, pending.options)
+        option = self._match_pending_option(selection, pending.options)
+        if refined.detected_title:
+            candidate = VisionCandidate(
+                detected_title=refined.detected_title,
+                media_type=refined.media_type,
+                year=refined.year,
+                confidence=max(refined.confidence, 0.96),
+                alt_titles=refined.alt_titles or [entry.get("label", "") for entry in pending.options if entry.get("label")],
+                visible_text=[f"user_selection={selection.strip()}", *(refined.visible_text or [])],
             )
+        elif option is not None:
+            candidate = VisionCandidate(
+                detected_title=option["title"],
+                media_type=option["media_type"],
+                year=option.get("year"),
+                confidence=0.99,
+                alt_titles=[entry.get("label", "") for entry in pending.options if entry.get("label")],
+                visible_text=[f"user_selection={selection.strip()}"],
+            )
+        else:
+            parsed = self._parse_user_title_hint(selection)
+            candidate = VisionCandidate(
+                detected_title=parsed["title"],
+                media_type=parsed["media_type"],
+                year=parsed.get("year"),
+                confidence=0.95,
+                visible_text=[f"user_hint={selection.strip()}"],
+            )
+        enriched = await self.tmdb.search_and_enrich(candidate)
         return await self.omdb.attach_ratings(enriched)
 
     async def format_media_reply(self, enriched: EnrichedMedia) -> str:
@@ -219,7 +330,9 @@ class PipelineService:
         release_date = self._format_date(enriched.release_date)
         return "\n".join(
             [
-                f"{enriched.title} ({enriched.year or 'N/A'})",
+                f"{(enriched.localized_title or enriched.title)} ({enriched.year or 'N/A'})",
+                f"Titulo original: {enriched.original_title or enriched.title}",
+                f"Titulo em portugues: {enriched.localized_title or enriched.title}",
                 f"Tipo: {'Serie' if enriched.media_type == 'series' else 'Filme'}",
                 f"Lancamento: {release_date}",
                 f"Generos: {genres}",
@@ -232,9 +345,6 @@ class PipelineService:
                 "",
                 "Resumo",
                 enriched.overview or "Sem resumo disponivel.",
-                "",
-                "Comando",
-                "- x-save",
             ]
         )
 
@@ -242,23 +352,11 @@ class PipelineService:
         return await self.format_media_reply(enriched)
 
     async def format_review_messages(self, enriched: EnrichedMedia) -> list[str]:
-        reviews = [str(review).strip() for review in enriched.reviews[:3] if str(review).strip()]
-        if len(reviews) < 3:
-            generated = await self.openrouter.generate_review_blurbs(enriched)
-            for review in generated:
-                review_text = str(review).strip()
-                if review_text and review_text not in reviews:
-                    reviews.append(review_text)
-                if len(reviews) == 3:
-                    break
+        reviews = [str(review).strip() for review in await self.reviews.fetch_reviews(enriched) if str(review).strip()]
         if not reviews:
-            return [
-                "Review 1\nNao encontrei review textual publica para este titulo. A recepcao parece mista pelos ratings disponiveis.",
-                "Review 2\nOs dados de catalogo indicam uma resposta critica limitada. Use este resultado como referencia inicial, nao como consenso.",
-                "Review 3\nSe quiser, envie outra imagem ou contexto adicional para eu refinar a identificacao e a leitura critica do titulo.",
-            ]
+            return ["Reviews\nNao encontrei reviews publicas integrais disponiveis em IMDb ou Letterboxd para este titulo."]
         localized = await self.openrouter.translate_reviews_to_pt_br(reviews, title=getattr(enriched, "title", None))
-        final_reviews = localized[:3] if localized else reviews[:3]
+        final_reviews = localized[: len(reviews)] if localized else reviews[:]
         return [f"Review {index + 1}\n{review}" for index, review in enumerate(final_reviews)]
 
     async def format_ambiguous_reply(self, options: list[str]) -> str:
@@ -269,13 +367,42 @@ class PipelineService:
                 "As melhores opcoes foram:",
                 *lines,
                 "",
-                "Envie uma imagem mais clara ou com mais contexto e depois use x-info novamente.",
+                "Responda com o numero da opcao mais adequada ou escreva o titulo correto com ano.",
             ]
         )
+
+    async def format_confirmation_retry_reply(self) -> str:
+        return (
+            "Ainda nao consegui confirmar o titulo com sua resposta.\n"
+            "Responda com o numero da opcao sugerida ou escreva algo como `Coherence (2013)`."
+        )
+
+    async def format_manual_help_reply(self, attempts: list[str] | None = None) -> str:
+        lines = [
+            "Nao consegui identificar o titulo com confianca suficiente, mesmo apos tentar OCR e modelos de visao mais fortes.",
+            "Se voce souber o titulo, responda nesta conversa com algo como `The Gift (2015)` ou `Coherence (2013)`.",
+            "Se preferir, envie outra imagem ou mais contexto e eu tento de novo.",
+        ]
+        if attempts:
+            lines.extend(["", "Modelos e etapas testados:"])
+            lines.extend(f"- {attempt}" for attempt in attempts[:8])
+        return "\n".join(lines)
+
+    async def format_watchlist_question(self, enriched: EnrichedMedia) -> str:
+        media_label = "serie" if enriched.media_type == "series" else "filme"
+        return f"Voce quer salvar este {media_label} na sua watchlist do Trakt? Responda aqui com sim ou nao."
+
+    async def format_watchlist_declined(self) -> str:
+        return "Certo, nao vou salvar este titulo na watchlist do Trakt."
+
+    async def format_watchlist_retry(self) -> str:
+        return "Responda com `sim` para salvar na watchlist do Trakt ou `nao` para ignorar."
 
     def build_watchlist_item(self, identified: IdentifiedMedia) -> EnrichedMedia:
         return EnrichedMedia(
             title=identified.title,
+            original_title=identified.payload.get("original_title") if isinstance(identified.payload, dict) else None,
+            localized_title=identified.payload.get("localized_title") if isinstance(identified.payload, dict) else None,
             media_type=identified.media_type,
             year=identified.year,
             tmdb_id=identified.tmdb_id,
@@ -293,6 +420,99 @@ class PipelineService:
             return parsed.strftime("%d/%m/%Y")
         except ValueError:
             return value
+
+    def build_pending_options(self, options: list[str], *, channel: str, image_message_id: int | None = None) -> PendingIdentificationState:
+        parsed_options = [self._parse_option_label(option) for option in options[:3]]
+        return PendingIdentificationState(
+            mode="ambiguity",
+            channel=channel,
+            image_message_id=image_message_id,
+            options=parsed_options,
+        )
+
+    def build_pending_manual_input(
+        self,
+        *,
+        channel: str,
+        image_message_id: int | None = None,
+        attempts: list[str] | None = None,
+    ) -> PendingIdentificationState:
+        return PendingIdentificationState(
+            mode="manual-input",
+            channel=channel,
+            image_message_id=image_message_id,
+            attempts=attempts or [],
+        )
+
+    def build_pending_watchlist_confirmation(
+        self,
+        *,
+        channel: str,
+        identified_media_id: int | None = None,
+    ) -> PendingIdentificationState:
+        return PendingIdentificationState(
+            mode="watchlist-confirmation",
+            channel=channel,
+            identified_media_id=identified_media_id,
+        )
+
+    def _match_pending_option(self, selection: str, options: list[dict[str, Any]]) -> dict[str, Any] | None:
+        trimmed = selection.strip()
+        if not trimmed:
+            return None
+        if trimmed.isdigit():
+            index = int(trimmed) - 1
+            if 0 <= index < len(options):
+                return options[index]
+        lowered = trimmed.casefold()
+        for option in options:
+            label = str(option.get("label") or "")
+            title = str(option.get("title") or "")
+            if lowered in {label.casefold(), title.casefold()}:
+                return option
+        return None
+
+    def _parse_option_label(self, label: str) -> dict[str, Any]:
+        match = self._parse_title_pattern(label)
+        if match is None:
+            return {"label": label, "title": label.strip(), "year": None, "media_type": "unknown"}
+        return {
+            "label": label,
+            "title": match["title"],
+            "year": match.get("year"),
+            "media_type": match["media_type"],
+        }
+
+    def _parse_user_title_hint(self, selection: str) -> dict[str, Any]:
+        parsed = self._parse_title_pattern(selection)
+        if parsed is not None:
+            return parsed
+        title = " ".join(selection.split()).strip(" -")
+        if len(title) < 2:
+            raise HTTPException(status_code=400, detail="Titulo manual invalido.")
+        return {"title": title, "year": None, "media_type": "unknown"}
+
+    def _parse_title_pattern(self, text: str) -> dict[str, Any] | None:
+        cleaned = " ".join(text.split()).strip()
+        pattern = re.compile(
+            r"^(?P<title>.+?)(?:\s*\((?P<year>\d{4}|N/A)\))?(?:\s*-\s*(?P<media>Filme|Serie|S[eé]rie|Movie|TV|Show))?$",
+            re.IGNORECASE,
+        )
+        match = pattern.match(cleaned)
+        if match is None:
+            return None
+        title = match.group("title").strip(" -")
+        if not title:
+            return None
+        year_value = match.group("year")
+        media_value = (match.group("media") or "").casefold()
+        media_type = "unknown"
+        if media_value in {"filme", "movie"}:
+            media_type = "movie"
+        elif media_value in {"serie", "série", "tv", "show"}:
+            media_type = "series"
+        year = int(year_value) if year_value and year_value.isdigit() else None
+        return {"title": title, "year": year, "media_type": media_type}
 
     async def persist_trakt_callback(
         self, db: AsyncSession, phone_number: str, token_payload: dict[str, Any]

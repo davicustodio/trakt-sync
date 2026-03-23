@@ -29,7 +29,16 @@ from app.utils import (
     normalize_requester_key,
     normalize_phone,
 )
-from app.worker import process_telegram_x_info, process_telegram_x_save, process_x_info, process_x_save
+from app.worker import (
+    process_telegram_x_info,
+    process_telegram_x_info_confirmation,
+    process_telegram_x_save,
+    process_telegram_watchlist_reply,
+    process_x_info,
+    process_x_info_confirmation,
+    process_x_save,
+    process_x_watchlist_reply,
+)
 
 templates = Jinja2Templates(directory="app/templates")
 poller_task: asyncio.Task | None = None
@@ -98,6 +107,24 @@ async def dispatch_command(
         background_tasks.add_task(process_x_save, {}, chat_jid, requester_phone)
 
 
+async def dispatch_confirmation(
+    chat_jid: str,
+    requester_phone: str,
+    selection: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    background_tasks.add_task(process_x_info_confirmation, {}, chat_jid, requester_phone, selection)
+
+
+async def dispatch_watchlist_reply(
+    chat_jid: str,
+    requester_phone: str,
+    selection: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    background_tasks.add_task(process_x_watchlist_reply, {}, chat_jid, requester_phone, selection)
+
+
 async def dispatch_command_inline(
     command: str, chat_jid: str, requester_phone: str, trigger_message_id: str | None = None
 ) -> None:
@@ -121,6 +148,24 @@ async def dispatch_telegram_command(
         background_tasks.add_task(process_telegram_x_save, {}, chat_id, requester_key, status_message_id)
 
 
+async def dispatch_telegram_confirmation(
+    chat_id: str,
+    requester_key: str,
+    selection: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    background_tasks.add_task(process_telegram_x_info_confirmation, {}, chat_id, requester_key, selection)
+
+
+async def dispatch_telegram_watchlist_reply(
+    chat_id: str,
+    requester_key: str,
+    selection: str,
+    background_tasks: BackgroundTasks,
+) -> None:
+    background_tasks.add_task(process_telegram_watchlist_reply, {}, chat_id, requester_key, selection)
+
+
 async def _handle_telegram_utility_command(
     normalized: NormalizedMessage,
     settings: Settings,
@@ -136,14 +181,14 @@ async def _handle_telegram_utility_command(
         await db.commit()
         await telegram.send_text(
             normalized.chat_jid,
-            "Bot ativo.\nEnvie uma foto com `x-info` na legenda ou envie a foto e depois `x-info`.\nUse `/trakt-connect` para ligar sua conta Trakt.",
+            "Bot ativo.\nEnvie uma foto e eu identifico automaticamente o filme ou a serie.\nUse /trakt-connect para ligar sua conta Trakt.",
         )
         return {"status": "accepted", "command": command}
 
     if command == "/help":
         await telegram.send_text(
             normalized.chat_jid,
-            "/start\n/help\n/whoami\n/trakt-connect\n/trakt-status\n/admin-help\nx-info\nx-save",
+            "/start\n/help\n/whoami\n/trakt-connect\n/trakt-status\n/admin-help\n\nEnvie uma foto e eu identifico automaticamente o titulo.\nDepois eu pergunto se voce quer salvar na watchlist do Trakt.",
         )
         return {"status": "accepted", "command": command}
 
@@ -270,6 +315,15 @@ async def handle_normalized_message(
         return {"status": "ignored", "reason": "duplicate-event"}
 
     command = canonical_command(normalized.text_body)
+    resolved_command = command
+    if normalized.message_type == "image" and command != "x-save":
+        resolved_command = "x-info"
+    pending_getter = getattr(service, "get_pending_identification", None)
+    pending = (
+        await pending_getter(normalized.chat_jid, normalized.requester_phone)
+        if callable(pending_getter)
+        else None
+    )
     if normalized.channel == "telegram":
         access_granted = await _check_telegram_access(normalized, settings, db)
         if not access_granted:
@@ -283,17 +337,20 @@ async def handle_normalized_message(
         "/admin-help",
     }:
         return await _handle_telegram_utility_command(normalized, settings, db)
-    if command in {"x-info", "x-save"}:
+    if resolved_command in {"x-info", "x-save"}:
         if normalized.channel == "telegram":
             telegram = TelegramClient(settings)
-            total_steps = 6 if command == "x-info" else 5
-            await telegram.send_text(normalized.chat_jid, f"Recebi sua solicitacao. O {command} esta em processamento.")
+            total_steps = 6 if resolved_command == "x-info" else 5
+            await telegram.send_text(
+                normalized.chat_jid,
+                "Recebi sua imagem. Estou analisando agora." if normalized.message_type == "image" else f"Recebi sua solicitacao. O {resolved_command} esta em processamento.",
+            )
             status_message_id = await telegram.send_text(
                 normalized.chat_jid,
-                f"[{command}] Etapa 1/{total_steps}: preparando o processamento.",
+                f"[{resolved_command}] Etapa 1/{total_steps}: preparando o processamento.",
             )
             if background_tasks is None or force_inline_dispatch:
-                if command == "x-info":
+                if resolved_command == "x-info":
                     await process_telegram_x_info(
                         {}, normalized.chat_jid, normalized.requester_phone, normalized.provider_message_id, status_message_id
                     )
@@ -301,30 +358,70 @@ async def handle_normalized_message(
                     await process_telegram_x_save({}, normalized.chat_jid, normalized.requester_phone, status_message_id)
             else:
                 await dispatch_telegram_command(
-                    command,
+                    resolved_command,
                     normalized.chat_jid,
                     normalized.requester_phone,
                     background_tasks,
                     normalized.provider_message_id,
                     status_message_id,
                 )
-            return {"status": "accepted", "command": command}
+            return {"status": "accepted", "command": resolved_command}
         if force_inline_dispatch or background_tasks is None:
             await dispatch_command_inline(
-                command,
+                resolved_command,
                 normalized.chat_jid,
                 normalized.requester_phone,
                 normalized.provider_message_id,
             )
         else:
             await dispatch_command(
-                command,
+                resolved_command,
                 normalized.chat_jid,
                 normalized.requester_phone,
                 background_tasks,
                 normalized.provider_message_id,
             )
-    return {"status": "accepted", "command": command or None}
+    if (
+        pending is not None
+        and command not in {"x-info", "x-save", "/start", "/help", "/whoami", "/trakt-connect", "/trakt-status", "/admin-help"}
+        and normalized.message_type == "text"
+        and (normalized.text_body or "").strip()
+    ):
+        selection = str(normalized.text_body).strip()
+        if pending.mode == "watchlist-confirmation":
+            if normalized.channel == "telegram":
+                if background_tasks is None or force_inline_dispatch:
+                    await process_telegram_watchlist_reply({}, normalized.chat_jid, normalized.requester_phone, selection)
+                else:
+                    await dispatch_telegram_watchlist_reply(
+                        normalized.chat_jid,
+                        normalized.requester_phone,
+                        selection,
+                        background_tasks,
+                    )
+                return {"status": "accepted", "command": "watchlist-confirmation"}
+            if force_inline_dispatch or background_tasks is None:
+                await process_x_watchlist_reply({}, normalized.chat_jid, normalized.requester_phone, selection)
+            else:
+                await dispatch_watchlist_reply(normalized.chat_jid, normalized.requester_phone, selection, background_tasks)
+            return {"status": "accepted", "command": "watchlist-confirmation"}
+        if normalized.channel == "telegram":
+            if background_tasks is None or force_inline_dispatch:
+                await process_telegram_x_info_confirmation({}, normalized.chat_jid, normalized.requester_phone, selection)
+            else:
+                await dispatch_telegram_confirmation(
+                    normalized.chat_jid,
+                    normalized.requester_phone,
+                    selection,
+                    background_tasks,
+                )
+            return {"status": "accepted", "command": "x-info-confirmation"}
+        if force_inline_dispatch or background_tasks is None:
+            await process_x_info_confirmation({}, normalized.chat_jid, normalized.requester_phone, selection)
+        else:
+            await dispatch_confirmation(normalized.chat_jid, normalized.requester_phone, selection, background_tasks)
+        return {"status": "accepted", "command": "x-info-confirmation"}
+    return {"status": "accepted", "command": resolved_command or command or None}
 
 
 async def reconcile_recent_owner_messages(settings: Settings) -> None:

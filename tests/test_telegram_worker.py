@@ -34,6 +34,9 @@ async def test_process_telegram_x_info_updates_status_and_sends_final_message(mo
             return SimpleNamespace(provider_message_id="img-1", media_url="telegram-file-1")
 
         async def save_identified_media(self, message, enriched) -> None:
+            return SimpleNamespace(id=22)
+
+        async def store_pending_identification(self, chat_jid: str, requester_phone: str, pending) -> None:
             return None
 
     class FakeTelegram:
@@ -55,6 +58,8 @@ async def test_process_telegram_x_info_updates_status_and_sends_final_message(mo
         async def enrich_from_image(self, provider_message_id: str, media_url: str | None = None, **kwargs):
             return SimpleNamespace(
                 title="Pulp Fiction",
+                original_title="Pulp Fiction",
+                localized_title="Pulp Fiction",
                 year=1994,
                 media_type="movie",
                 ratings={},
@@ -69,6 +74,12 @@ async def test_process_telegram_x_info_updates_status_and_sends_final_message(mo
 
         async def format_review_messages(self, enriched) -> list[str]:
             return ["Review 1"]
+
+        def build_pending_watchlist_confirmation(self, *, channel: str, identified_media_id: int | None = None):
+            return SimpleNamespace(mode="watchlist-confirmation", channel=channel, identified_media_id=identified_media_id)
+
+        async def format_watchlist_question(self, enriched) -> str:
+            return "Voce quer salvar este filme na sua watchlist do Trakt? Responda aqui com sim ou nao."
 
     monkeypatch.setattr("app.worker.get_settings", lambda: SimpleNamespace())
     monkeypatch.setattr("app.worker.SessionLocal", lambda: DummyContextManager(object()))
@@ -85,7 +96,11 @@ async def test_process_telegram_x_info_updates_status_and_sends_final_message(mo
         "[x-info] Etapa 6/6: montando a resposta final.",
         "[x-info] Concluido com sucesso.",
     ]
-    assert sent == ["Pulp Fiction (1994)", "Review 1"]
+    assert sent == [
+        "Pulp Fiction (1994)",
+        "Review 1",
+        "Voce quer salvar este filme na sua watchlist do Trakt? Responda aqui com sim ou nao.",
+    ]
 
 
 @pytest.mark.asyncio
@@ -120,6 +135,12 @@ async def test_process_telegram_x_save_reports_success(monkeypatch) -> None:
 
         async def get_latest_identified_media(self, requester_phone: str):
             return SimpleNamespace(title="Pulp Fiction", media_type="movie", year=1994, imdb_id="tt0110912", tmdb_id=680)
+
+        async def clear_pending_identification(self, chat_jid: str, requester_phone: str | None = None) -> None:
+            return None
+
+        async def clear_pending_identification(self, chat_jid: str, requester_phone: str | None = None) -> None:
+            return None
 
     class FakeTelegram:
         async def send_text(self, chat_id: str, text: str) -> int | None:

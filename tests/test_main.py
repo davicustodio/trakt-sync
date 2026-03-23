@@ -1,9 +1,11 @@
 from fastapi import BackgroundTasks
 import pytest
+from types import SimpleNamespace
 
 from app.config import Settings
 from app.auth import is_authorized_self_chat
-from app.main import dispatch_command, reconcile_recent_owner_messages
+from app.main import dispatch_command, handle_normalized_message, reconcile_recent_owner_messages
+from app.schemas import PendingIdentificationState
 from app.schemas import NormalizedMessage
 
 
@@ -175,3 +177,87 @@ async def test_reconcile_recent_owner_messages_backfills_missed_webhooks(monkeyp
     await reconcile_recent_owner_messages(settings)
 
     assert handled == [("img-1", "image", None), ("cmd-1", "text", "x-info")]
+
+
+@pytest.mark.asyncio
+async def test_handle_normalized_message_routes_pending_confirmation(monkeypatch) -> None:
+    settings = Settings.model_construct(
+        evolution_base_url="https://example.com",
+        evolution_api_key="test",
+        evolution_instance="meu-whatsapp",
+        evolution_owner_phone="5519988343888",
+        openrouter_api_key="test",
+        tmdb_api_token="test",
+        omdb_api_key="test",
+        trakt_client_id="test",
+        trakt_client_secret="test",
+    )
+    calls: list[tuple[str, str]] = []
+
+    class FakeMessageService:
+        def __init__(self, settings_obj, db) -> None:
+            pass
+
+        async def persist_message(self, normalized):
+            return SimpleNamespace(created=True)
+
+        async def get_pending_identification(self, chat_jid: str, requester_phone: str | None = None):
+            return PendingIdentificationState(mode="ambiguity", channel="whatsapp", options=[{"title": "The Gift"}])
+
+    async def fake_process_x_info_confirmation(ctx: dict, chat_jid: str, requester_phone: str, selection: str) -> None:
+        calls.append((chat_jid, selection))
+
+    monkeypatch.setattr("app.main.MessageService", FakeMessageService)
+    monkeypatch.setattr("app.main.process_x_info_confirmation", fake_process_x_info_confirmation)
+
+    response = await handle_normalized_message(
+        build_message(text_body="1"),
+        settings,
+        object(),
+        force_inline_dispatch=True,
+    )
+
+    assert response == {"status": "accepted", "command": "x-info-confirmation"}
+    assert calls == [("5519988343888@s.whatsapp.net", "1")]
+
+
+@pytest.mark.asyncio
+async def test_handle_normalized_message_auto_triggers_x_info_for_image(monkeypatch) -> None:
+    settings = Settings.model_construct(
+        evolution_base_url="https://example.com",
+        evolution_api_key="test",
+        evolution_instance="meu-whatsapp",
+        evolution_owner_phone="5519988343888",
+        openrouter_api_key="test",
+        tmdb_api_token="test",
+        omdb_api_key="test",
+        trakt_client_id="test",
+        trakt_client_secret="test",
+    )
+    calls: list[str] = []
+
+    class FakeMessageService:
+        def __init__(self, settings_obj, db) -> None:
+            pass
+
+        async def persist_message(self, normalized):
+            return SimpleNamespace(created=True)
+
+        async def get_pending_identification(self, chat_jid: str, requester_phone: str | None = None):
+            return None
+
+    async def fake_dispatch_command_inline(command: str, chat_jid: str, requester_phone: str, trigger_message_id: str | None = None):
+        calls.append(command)
+
+    monkeypatch.setattr("app.main.MessageService", FakeMessageService)
+    monkeypatch.setattr("app.main.dispatch_command_inline", fake_dispatch_command_inline)
+
+    response = await handle_normalized_message(
+        build_message(message_type="image", text_body=None, media_url="https://example.com/image.jpg"),
+        settings,
+        object(),
+        force_inline_dispatch=True,
+    )
+
+    assert response == {"status": "accepted", "command": "x-info"}
+    assert calls == ["x-info"]

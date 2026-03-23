@@ -38,6 +38,8 @@ class VisionCandidate(BaseModel):
 
 class EnrichedMedia(BaseModel):
     title: str
+    original_title: str | None = None
+    localized_title: str | None = None
     media_type: str
     year: int | None = None
     tmdb_id: int | None = None
@@ -50,6 +52,15 @@ class EnrichedMedia(BaseModel):
     reviews: list[str] = Field(default_factory=list)
     confidence: float = 0.0
     payload: dict[str, Any] = Field(default_factory=dict)
+
+
+class PendingIdentificationState(BaseModel):
+    mode: str
+    channel: str
+    image_message_id: int | None = None
+    identified_media_id: int | None = None
+    options: list[dict[str, Any]] = Field(default_factory=list)
+    attempts: list[str] = Field(default_factory=list)
 
 
 class TraktLinkState(BaseModel):

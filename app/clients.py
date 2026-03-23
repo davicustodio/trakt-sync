@@ -315,59 +315,64 @@ class OpenRouterClient:
         return self._ocr_engine
 
     async def identify_title(self, image_bytes: bytes) -> VisionCandidate:
-        ocr_candidate = self._identify_title_from_ocr(image_bytes)
-        ocr_hint: VisionCandidate | None = None
-        if ocr_candidate is not None and self._should_return_ocr_candidate(ocr_candidate):
-            return ocr_candidate
-        if ocr_candidate is not None:
-            ocr_hint = ocr_candidate
+        attempts: list[str] = []
+        try:
+            async with asyncio.timeout(self.settings.openrouter_vision_total_timeout_seconds):
+                ocr_candidate = self._identify_title_from_ocr(image_bytes)
+                ocr_hint: VisionCandidate | None = None
+                if ocr_candidate is not None and self._should_return_ocr_candidate(ocr_candidate):
+                    return ocr_candidate
+                if ocr_candidate is not None:
+                    ocr_hint = ocr_candidate
 
-        image_b64 = base64.b64encode(image_bytes).decode("ascii")
-        attempts = ["ocr: no confident local text match"]
-        ocr_hint_text = ""
-        if ocr_hint and ocr_hint.detected_title:
-            ocr_hint_text = (
-                f" Visible text may read as '{ocr_hint.detected_title}'. "
-                "If spacing is collapsed, restore the natural title spacing before answering."
-            )
-        prompt = (
-            "A imagem em anexo se refere a algum filme ou serie. "
-            "Seu objetivo e descobrir o titulo ORIGINAL desse filme ou serie. "
-            "Use o contexto visual da imagem, personagens, frame, poster, screenshot de rede social e qualquer texto visivel. "
-            "Se houver texto, cruze o texto com o contexto visual para encontrar o titulo original mais provavel. "
-            "Se houver varias possibilidades plausiveis para o mesmo contexto, nao invente certeza: coloque a melhor em detected_title "
-            "e preencha alt_titles com as outras opcoes mais provaveis para eu poder pedir confirmacao ao usuario. "
-            "Retorne JSON apenas com as chaves: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
-            "media_type deve ser movie, series ou unknown. "
-            "confidence deve ficar entre 0 e 1."
-            + ocr_hint_text
-        )
-        parsed, query_attempts = await self._query_candidate(image_b64, prompt, use_json_mode=True)
-        attempts.extend(query_attempts)
-        if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
-            return parsed
+                image_b64 = base64.b64encode(image_bytes).decode("ascii")
+                attempts = ["ocr: no confident local text match"]
+                ocr_hint_text = ""
+                if ocr_hint and ocr_hint.detected_title:
+                    ocr_hint_text = (
+                        f" Visible text may read as '{ocr_hint.detected_title}'. "
+                        "If spacing is collapsed, restore the natural title spacing before answering."
+                    )
+                prompt = (
+                    "A imagem em anexo se refere a algum filme ou serie. "
+                    "Seu objetivo e descobrir o titulo ORIGINAL desse filme ou serie. "
+                    "Use o contexto visual da imagem, personagens, frame, poster, screenshot de rede social e qualquer texto visivel. "
+                    "Se houver texto, cruze o texto com o contexto visual para encontrar o titulo original mais provavel. "
+                    "Se houver varias possibilidades plausiveis para o mesmo contexto, nao invente certeza: coloque a melhor em detected_title "
+                    "e preencha alt_titles com as outras opcoes mais provaveis para eu poder pedir confirmacao ao usuario. "
+                    "Retorne JSON apenas com as chaves: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
+                    "media_type deve ser movie, series ou unknown. "
+                    "confidence deve ficar entre 0 e 1."
+                    + ocr_hint_text
+                )
+                parsed, query_attempts = await self._query_candidate(image_b64, prompt, use_json_mode=True)
+                attempts.extend(query_attempts)
+                if parsed.detected_title and parsed.confidence >= self.settings.openrouter_confidence_threshold:
+                    return parsed
 
-        assertive_candidate, assertive_attempts = await self._query_assertive_text_candidate(image_bytes, ocr_hint)
-        attempts.extend(assertive_attempts)
-        if assertive_candidate.detected_title and assertive_candidate.confidence >= 0.7:
-            return assertive_candidate
+                assertive_candidate, assertive_attempts = await self._query_assertive_text_candidate(image_bytes, ocr_hint)
+                attempts.extend(assertive_attempts)
+                if assertive_candidate.detected_title and assertive_candidate.confidence >= 0.7:
+                    return assertive_candidate
 
-        ocr_prompt = (
-            "Leia o texto visivel na imagem e use esse texto junto com o contexto visual para inferir o titulo ORIGINAL do filme ou da serie. "
-            "Se o titulo estiver escrito na imagem, copie o titulo original em detected_title. "
-            "Se houver mais de uma opcao plausivel, preencha alt_titles com as melhores alternativas. "
-            "Retorne JSON apenas com as chaves: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
-            "visible_text deve conter as principais linhas legiveis da imagem."
-        )
-        parsed, query_attempts = await self._query_candidate(image_b64, ocr_prompt, use_json_mode=False)
-        attempts.extend(query_attempts)
-        if parsed.detected_title and parsed.confidence >= 0.75:
-            return parsed
+                ocr_prompt = (
+                    "Leia o texto visivel na imagem e use esse texto junto com o contexto visual para inferir o titulo ORIGINAL do filme ou da serie. "
+                    "Se o titulo estiver escrito na imagem, copie o titulo original em detected_title. "
+                    "Se houver mais de uma opcao plausivel, preencha alt_titles com as melhores alternativas. "
+                    "Retorne JSON apenas com as chaves: detected_title, media_type, year, confidence, alt_titles, visible_text, need_clarification. "
+                    "visible_text deve conter as principais linhas legiveis da imagem."
+                )
+                parsed, query_attempts = await self._query_candidate(image_b64, ocr_prompt, use_json_mode=False)
+                attempts.extend(query_attempts)
+                if parsed.detected_title and parsed.confidence >= 0.75:
+                    return parsed
 
-        rescue_candidate, rescue_attempts = await self._query_scene_rescue_candidate(image_bytes, ocr_hint)
-        attempts.extend(rescue_attempts)
-        if rescue_candidate.detected_title and rescue_candidate.confidence >= 0.55:
-            return rescue_candidate
+                rescue_candidate, rescue_attempts = await self._query_scene_rescue_candidate(image_bytes, ocr_hint)
+                attempts.extend(rescue_attempts)
+                if rescue_candidate.detected_title and rescue_candidate.confidence >= 0.55:
+                    return rescue_candidate
+        except TimeoutError:
+            attempts.append("vision-time-budget-exceeded")
         raise VisionIdentificationError("Nao consegui identificar o titulo com confianca suficiente.", attempts)
 
     async def generate_review_blurbs(self, enriched: EnrichedMedia) -> list[str]:
@@ -813,10 +818,10 @@ class OpenRouterClient:
     ) -> tuple[VisionCandidate, list[str]]:
         attempts: list[str] = []
         model_sequence = [*(models or self.settings.openrouter_vision_models)]
-        if models is None and self.settings.openrouter_enable_paid_fallback:
-            model_sequence.extend(self.settings.openrouter_paid_vision_models)
-            model_sequence.append(self.settings.openrouter_emergency_router)
-        async with httpx.AsyncClient(base_url="https://openrouter.ai/api/v1", timeout=90.0) as client:
+        async with httpx.AsyncClient(
+            base_url="https://openrouter.ai/api/v1",
+            timeout=self.settings.openrouter_vision_request_timeout_seconds,
+        ) as client:
             for model in model_sequence:
                 payload = {
                     "model": model,

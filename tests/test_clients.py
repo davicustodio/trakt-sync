@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import base64
 import json
 from types import SimpleNamespace
@@ -9,6 +10,7 @@ from PIL import Image, ImageDraw, ImageFont
 
 from app.clients import EvolutionClient, LetterboxdReviewClient, OpenRouterClient, TMDbClient, TelegramClient
 from app.config import Settings
+from app.exceptions import VisionIdentificationError
 from app.schemas import VisionCandidate
 
 
@@ -450,7 +452,7 @@ async def test_refine_title_from_user_feedback_uses_llm_result(monkeypatch) -> N
 
 
 @pytest.mark.asyncio
-async def test_query_candidate_uses_paid_fallback_after_free_models(monkeypatch) -> None:
+async def test_query_candidate_only_uses_explicit_model_sequence(monkeypatch) -> None:
     requested_models: list[str] = []
 
     class FakeResponse:
@@ -495,12 +497,9 @@ async def test_query_candidate_uses_paid_fallback_after_free_models(monkeypatch)
 
     candidate, attempts = await client._query_candidate("ZmFrZQ==", "prompt", use_json_mode=True)
 
-    assert requested_models == ["google/gemma-3-27b-it:free", "google/gemini-2.5-flash"]
-    assert candidate.detected_title == "Inland Empire"
-    assert attempts == [
-        "google/gemma-3-27b-it:free: RuntimeError",
-        "google/gemini-2.5-flash: Inland Empire (confidence=0.97, type=movie)",
-    ]
+    assert requested_models == ["google/gemma-3-27b-it:free"]
+    assert candidate.detected_title is None
+    assert attempts == ["google/gemma-3-27b-it:free: RuntimeError"]
 
 
 @pytest.mark.asyncio
@@ -532,6 +531,24 @@ async def test_identify_title_uses_paid_scene_rescue_after_free_failures(monkeyp
     assert calls[0] == (None, True)
     assert calls[1][1] is True
     assert "openai/gpt-4.1-mini" in (calls[1][0] or [])
+
+
+@pytest.mark.asyncio
+async def test_identify_title_stops_when_time_budget_is_exceeded(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+    client.settings.openrouter_vision_total_timeout_seconds = 0.01
+    monkeypatch.setattr(client, "_identify_title_from_ocr", lambda image_bytes: None)
+
+    async def fake_query_candidate(image_b64: str, prompt: str, *, use_json_mode: bool, models=None):
+        await asyncio.sleep(0.05)
+        return VisionCandidate(), ["slow-model: timeout"]
+
+    monkeypatch.setattr(client, "_query_candidate", fake_query_candidate)
+
+    with pytest.raises(VisionIdentificationError) as exc_info:
+        await client.identify_title(b"fake-image")
+
+    assert "vision-time-budget-exceeded" in exc_info.value.attempts
 
 
 @pytest.mark.asyncio

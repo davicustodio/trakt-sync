@@ -79,6 +79,8 @@ class Settings(BaseSettings):
     )
     openrouter_emergency_router: str = "openrouter/free"
     openrouter_confidence_threshold: float = 0.80
+    openrouter_vision_request_timeout_seconds: float = 25.0
+    openrouter_vision_total_timeout_seconds: float = 75.0
 
     tmdb_api_token: str
     tmdb_api_key: str | None = None

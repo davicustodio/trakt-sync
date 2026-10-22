@@ -412,8 +412,8 @@ class PipelineService:
         return "\n".join(lines)
 
     async def format_watchlist_question(self, enriched: EnrichedMedia) -> str:
-        media_label = "serie" if enriched.media_type == "series" else "filme"
-        return f"Voce quer salvar este {media_label} na sua watchlist do Trakt? Responda aqui com sim ou nao."
+        media_label = "esta serie" if enriched.media_type == "series" else "este filme"
+        return f"Voce quer salvar {media_label} na sua watchlist do Trakt? Responda aqui com sim ou nao."
 
     async def format_watchlist_declined(self) -> str:
         return "Certo, nao vou salvar este titulo na watchlist do Trakt."

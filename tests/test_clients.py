@@ -307,6 +307,20 @@ def test_extract_explicit_title_from_lines_prefers_original_title_label() -> Non
     assert title == "The Aeronauts"
 
 
+def test_extract_explicit_title_from_trailing_portuguese_label() -> None:
+    client = OpenRouterClient(build_settings())
+
+    title = client._extract_explicit_title_from_lines(
+        [
+            "Patrocinado 1",
+            "Practical Magic 2 (título original)",
+            "2026 12 2h 10m",
+        ]
+    )
+
+    assert title == "Practical Magic 2"
+
+
 def test_extract_year_from_lines_finds_catalog_year() -> None:
     client = OpenRouterClient(build_settings())
 
@@ -319,6 +333,7 @@ def test_extract_year_from_lines_finds_catalog_year() -> None:
     )
 
     assert year == 2019
+    assert client._extract_year_from_lines(["202612 2h 10m"]) == 2026
 
 
 def test_identify_title_from_ocr_uses_explicit_original_title_from_variant(monkeypatch) -> None:
@@ -340,6 +355,28 @@ def test_identify_title_from_ocr_uses_explicit_original_title_from_variant(monke
     assert candidate.detected_title == "The Aeronauts"
     assert candidate.confidence == 0.99
     assert candidate.year == 2019
+
+
+def test_identify_title_from_ocr_ignores_advertising_label(monkeypatch) -> None:
+    client = OpenRouterClient(build_settings())
+    monkeypatch.setattr(client, "_build_ocr_variants", lambda image_bytes: [("original", b"variant")])
+    monkeypatch.setattr(
+        client,
+        "_run_ocr",
+        lambda image_bytes: [
+            {"text": "Patrocinado 1", "bbox": [], "score": 0.99},
+            {"text": "Practical Magic 2 (título original)", "bbox": [], "score": 0.98},
+            {"text": "2026 12 2h 10m", "bbox": [], "score": 0.9},
+        ],
+    )
+
+    candidate = client._identify_title_from_ocr(b"fake-image")
+
+    assert candidate is not None
+    assert candidate.detected_title == "Practical Magic 2"
+    assert candidate.year == 2026
+    assert client._guess_title_line([{"text": "Patrocinado 1", "bbox": [], "score": 0.99}]) is None
+    assert client._extract_title_from_context_lines(["Patrocinado 1"]) is None
 
 
 def test_guess_title_line_rejects_promotional_tagline() -> None:
@@ -659,6 +696,42 @@ async def test_trakt_public_data_403_keeps_identified_media_usable(monkeypatch) 
     assert await TraktClient(build_settings()).attach_public_ratings(enriched) is enriched
     assert enriched.ratings == {"IMDb": "8.0/10"}
     assert await TraktReviewClient(build_settings()).fetch_reviews(enriched) == []
+
+
+@pytest.mark.asyncio
+async def test_trakt_public_rating_requires_matching_catalog_id(monkeypatch) -> None:
+    original_async_client = httpx.AsyncClient
+
+    def unrelated(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(200, json=[{"movie": {"title": "The Matrix", "year": 1999, "rating": 9.1, "ids": {"tmdb": 999}}}])
+
+    transport = httpx.MockTransport(unrelated)
+    monkeypatch.setattr(
+        "app.clients.httpx.AsyncClient",
+        lambda *args, **kwargs: original_async_client(*args, transport=transport, **kwargs),
+    )
+    enriched = SimpleNamespace(title="The Matrix", original_title="The Matrix", media_type="movie", year=1999, tmdb_id=603, imdb_id="tt0133093", ratings={}, payload={})
+
+    assert await TraktClient(build_settings()).attach_public_ratings(enriched) is enriched
+    assert enriched.ratings == {}
+
+
+@pytest.mark.asyncio
+async def test_trakt_watchlist_rejects_unconfirmed_response(monkeypatch) -> None:
+    original_async_client = httpx.AsyncClient
+
+    def not_found(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(201, json={"added": {"movies": 0}, "existing": {"movies": 0}, "not_found": {"movies": [{"ids": {"tmdb": 603}}]}})
+
+    transport = httpx.MockTransport(not_found)
+    monkeypatch.setattr(
+        "app.clients.httpx.AsyncClient",
+        lambda *args, **kwargs: original_async_client(*args, transport=transport, **kwargs),
+    )
+    enriched = SimpleNamespace(media_type="movie", tmdb_id=603, imdb_id=None)
+
+    with pytest.raises(ValueError, match="nao confirmou"):
+        await TraktClient(build_settings()).add_to_watchlist("token", enriched)
 
 
 @pytest.mark.asyncio

@@ -336,6 +336,17 @@ class OpenRouterClient:
                         f" Visible text may read as '{ocr_hint.detected_title}'. "
                         "If spacing is collapsed, restore the natural title spacing before answering."
                     )
+                if ocr_hint and ocr_hint.visible_text:
+                    visible_lines = [
+                        line for line in ocr_hint.visible_text
+                        if not line.startswith("ocr_variant=") and not self._is_advertising_label(line)
+                    ][:16]
+                    if visible_lines:
+                        ocr_hint_text += (
+                            " OCR text observed in the image (may include site navigation or unrelated text): "
+                            + json.dumps(visible_lines, ensure_ascii=False)
+                            + ". Use distinctive dialogue or credits as clues, but do not treat ads or navigation as a film title."
+                        )
                 assertive_first = self._should_prioritize_assertive_title_resolution(ocr_hint)
                 if assertive_first:
                     assertive_candidate, assertive_attempts = await self._query_assertive_text_candidate(image_bytes, ocr_hint)
@@ -473,11 +484,17 @@ class OpenRouterClient:
                     return None
             self._ocr_engine = RapidOCR()
 
+        weak_candidate: VisionCandidate | None = None
+        primary_lines: list[str] = []
         for variant_name, candidate_bytes in self._build_ocr_variants(image_bytes):
             entries = self._run_ocr(candidate_bytes)
             lines = [entry["text"] for entry in entries]
             if not lines:
                 continue
+            if not primary_lines:
+                primary_lines = lines
+            if weak_candidate is None:
+                weak_candidate = VisionCandidate(visible_text=[*lines, f"ocr_variant={variant_name}"])
 
             explicit_title = self._extract_explicit_title_from_lines(lines)
             if explicit_title:
@@ -496,7 +513,7 @@ class OpenRouterClient:
                     continue
                 title = match.group("title").strip(" -")
                 year = int(match.group("year"))
-                if title:
+                if title and not self._is_advertising_label(title):
                     return VisionCandidate(
                         detected_title=title,
                         media_type="movie",
@@ -507,55 +524,57 @@ class OpenRouterClient:
             title = self._guess_title_line(entries)
             if title:
                 extracted_year = self._extract_year_from_lines(lines)
-                return VisionCandidate(
+                proposed = VisionCandidate(
                     detected_title=title,
                     media_type="unknown",
                     year=extracted_year,
-                    confidence=0.9,
-                    visible_text=[*lines, f"ocr_variant={variant_name}"],
+                    confidence=0.65,
+                    visible_text=[*primary_lines, f"ocr_variant={variant_name}"],
                 )
+                if self._prefer_weak_ocr_candidate(proposed, weak_candidate):
+                    weak_candidate = proposed
+                continue
             contextual_title = self._extract_title_from_context_lines(lines)
             if contextual_title:
                 extracted_year = self._extract_year_from_lines(lines)
-                return VisionCandidate(
+                proposed = VisionCandidate(
                     detected_title=contextual_title,
                     media_type="unknown",
                     year=extracted_year,
-                    confidence=0.84,
-                    visible_text=[*lines, f"ocr_variant={variant_name}"],
+                    confidence=0.6,
+                    visible_text=[*primary_lines, f"ocr_variant={variant_name}"],
                 )
-        return None
+                if self._prefer_weak_ocr_candidate(proposed, weak_candidate):
+                    weak_candidate = proposed
+        return weak_candidate
+
+    def _prefer_weak_ocr_candidate(self, proposed: VisionCandidate, current: VisionCandidate | None) -> bool:
+        if current is None or not current.detected_title:
+            return True
+        proposed_words = len((proposed.detected_title or "").split())
+        current_words = len((current.detected_title or "").split())
+        return (proposed_words, len(proposed.detected_title or ""), proposed.confidence) > (
+            current_words, len(current.detected_title or ""), current.confidence
+        )
 
     def _should_return_ocr_candidate(self, candidate: VisionCandidate) -> bool:
         title = (candidate.detected_title or "").strip()
         if not title:
             return False
-        if candidate.year:
-            return True
-        if candidate.media_type != "unknown":
-            return True
-        words = title.split()
-        if len(words) >= 2:
-            return True
-        if not title.isalpha():
-            return True
-        return False
-
-    def _should_prioritize_assertive_title_resolution(self, candidate: VisionCandidate | None) -> bool:
-        if candidate is None:
-            return False
-        if candidate.year:
+        if candidate.confidence >= 0.95:
             return True
         visible_text = " ".join(candidate.visible_text or []).casefold()
-        if "titulo original" in visible_text or "original title" in visible_text:
-            return True
-        title = (candidate.detected_title or "").strip()
-        return len(title.split()) >= 2
+        return bool(re.search(r"(?:t[ií]tulo\s+original|original\s+title)\s*[:(]", visible_text))
+
+    def _should_prioritize_assertive_title_resolution(self, candidate: VisionCandidate | None) -> bool:
+        return candidate is not None and self._should_return_ocr_candidate(candidate)
 
     def _extract_explicit_title_from_lines(self, lines: list[str]) -> str | None:
         patterns = [
-            r"titulo\s+original\s*[:\-]\s*(?P<title>[A-Za-z0-9'& .,:!?-]{2,})",
+            r"t[ií]tulo\s+original\s*[:\-]\s*(?P<title>.+)",
             r"original\s+title\s*[:\-]\s*(?P<title>[A-Za-z0-9'& .,:!?-]{2,})",
+            r"^(?P<title>.+?)\s*\(\s*t[ií]tulo\s+original\s*\)$",
+            r"^(?P<title>.+?)\s*\(\s*original\s+title\s*\)$",
         ]
         for raw_line in lines:
             line = " ".join(str(raw_line).split())
@@ -563,14 +582,23 @@ class OpenRouterClient:
                 match = re.search(pattern, line, flags=re.IGNORECASE)
                 if not match:
                     continue
-                title = match.group("title").strip(" -")
-                if title:
+                title = match.group("title").strip(" -:.")
+                if title and not self._is_advertising_label(title):
                     return title
         return None
 
+    def _is_advertising_label(self, value: str) -> bool:
+        return bool(
+            re.search(
+                r"\b(?:patrocinad[oa]|sponsored|advertisement|publicidade|an[uú]ncio)\b",
+                value,
+                re.IGNORECASE,
+            )
+        )
+
     def _extract_year_from_lines(self, lines: list[str]) -> int | None:
         for raw_line in lines:
-            for match in re.finditer(r"\b(19\d{2}|20\d{2})\b", str(raw_line)):
+            for match in re.finditer(r"(?<!\d)(19\d{2}|20\d{2})(?=\b|\d{1,2}\s)", str(raw_line)):
                 year = int(match.group(1))
                 if 1900 <= year <= 2099:
                     return year
@@ -581,7 +609,7 @@ class OpenRouterClient:
         candidate: VisionCandidate,
         ocr_hint: VisionCandidate | None,
     ) -> bool:
-        if ocr_hint is None:
+        if ocr_hint is None or not self._should_return_ocr_candidate(ocr_hint):
             return True
         hint_title = (ocr_hint.detected_title or "").strip()
         visible_text = " ".join(ocr_hint.visible_text or [])
@@ -746,6 +774,8 @@ class OpenRouterClient:
             raw_text = str(entry.get("text") or "").strip()
             if not raw_text:
                 continue
+            if self._is_advertising_label(raw_text):
+                continue
             if "www." in raw_text.lower() or "http" in raw_text.lower() or "@" in raw_text:
                 continue
             cleaned = re.sub(r"[^A-Za-z0-9&' -]", " ", raw_text)
@@ -797,7 +827,7 @@ class OpenRouterClient:
         best_score = 0.0
         for raw_line in lines:
             cleaned_line = " ".join(str(raw_line).replace("|", "-").split())
-            if not cleaned_line:
+            if not cleaned_line or self._is_advertising_label(cleaned_line):
                 continue
             for fragment_index, fragment in enumerate(re.split(r"[-:/]", cleaned_line)):
                 normalized = " ".join(fragment.split()).strip(" -")
@@ -1616,12 +1646,24 @@ class TraktClient:
 
     async def add_to_watchlist(self, access_token: str, enriched: EnrichedMedia) -> None:
         item_key = "shows" if enriched.media_type == "series" else "movies"
-        payload = {item_key: [{"ids": {"tmdb": enriched.tmdb_id, "imdb": enriched.imdb_id}}]}
+        ids = {key: value for key, value in {"tmdb": enriched.tmdb_id, "imdb": enriched.imdb_id}.items() if value}
+        if not ids:
+            raise ValueError("Titulo sem identificador externo para a watchlist do Trakt.")
+        payload = {item_key: [{"ids": ids}]}
         async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
             response = await client.post("/sync/watchlist", headers=self._headers(access_token), json=payload)
             response.raise_for_status()
+            result = response.json()
+            added = (result.get("added") or {}).get(item_key, 0) if isinstance(result, dict) else 0
+            existing = (result.get("existing") or {}).get(item_key, 0) if isinstance(result, dict) else 0
+            if not added and not existing:
+                raise ValueError("Trakt nao confirmou a inclusao do titulo na watchlist.")
 
     async def attach_public_ratings(self, enriched: EnrichedMedia) -> EnrichedMedia:
+        expected_tmdb = getattr(enriched, "tmdb_id", None)
+        expected_imdb = getattr(enriched, "imdb_id", None)
+        if not expected_tmdb and not expected_imdb:
+            return enriched
         query = enriched.original_title or enriched.title
         if not query:
             return enriched
@@ -1641,6 +1683,12 @@ class TraktClient:
         best_score = -1.0
         for item in payload if isinstance(payload, list) else []:
             node = item.get(resource) or {}
+            node_ids = node.get("ids") or {}
+            if not isinstance(node_ids, dict) or not (
+                (expected_tmdb and str(node_ids.get("tmdb")) == str(expected_tmdb))
+                or (expected_imdb and node_ids.get("imdb") == expected_imdb)
+            ):
+                continue
             title = str(node.get("title") or "").strip().casefold()
             original_title = str(node.get("original_title") or "").strip().casefold()
             query_title = str(query).strip().casefold()

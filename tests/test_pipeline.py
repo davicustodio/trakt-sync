@@ -6,7 +6,7 @@ import pytest
 
 from app.clients import TMDbClient
 from app.config import Settings
-from app.exceptions import AmbiguousTitleError
+from app.exceptions import AmbiguousTitleError, VisionIdentificationError
 from app.models import IdentifiedMedia
 from app.schemas import PendingIdentificationState
 from app.services import PipelineService
@@ -296,3 +296,25 @@ async def test_enrich_from_image_falls_back_to_omdb_when_tmdb_has_no_match() -> 
     assert enriched.title == "Virgin River"
     assert enriched.imdb_id == "tt9077530"
     assert enriched.payload["source"] == "omdb"
+
+
+@pytest.mark.asyncio
+async def test_enrich_from_image_does_not_offer_uncatalogued_title_for_watchlist() -> None:
+    pipeline = PipelineService(build_settings())
+
+    async def fake_fetch_media_bytes(*args, **kwargs):
+        return b"image"
+
+    async def fake_identify_title(_image: bytes):
+        return types.SimpleNamespace(detected_title="Patrocinado 1", media_type="movie", year=2026)
+
+    async def missing_catalog(_candidate):
+        raise HTTPException(status_code=404, detail="No match")
+
+    pipeline.fetch_media_bytes = fake_fetch_media_bytes
+    pipeline.openrouter.identify_title = fake_identify_title
+    pipeline.tmdb.search_and_enrich = missing_catalog
+    pipeline.omdb.search_and_enrich = missing_catalog
+
+    with pytest.raises(VisionIdentificationError, match="nao foi confirmado"):
+        await pipeline.enrich_from_image("msg-1")

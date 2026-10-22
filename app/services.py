@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.clients import EvolutionClient, OMDbClient, OpenRouterClient, ReviewSourceClient, TMDbClient, TelegramClient, TraktClient
 from app.config import Settings
+from app.exceptions import VisionIdentificationError
 from app.models import ChatState, IdentifiedMedia, IncomingMessage, PhoneProfile, TraktConnection
 from app.schemas import EnrichedMedia, NormalizedMessage, PendingIdentificationState, VisionCandidate
 
@@ -267,21 +268,13 @@ class PipelineService:
                 raise
             try:
                 enriched = await self.omdb.search_and_enrich(candidate)
-            except HTTPException:
-                enriched = EnrichedMedia(
-                    title=candidate.detected_title or "Titulo nao confirmado",
-                    original_title=candidate.detected_title,
-                    localized_title=candidate.detected_title,
-                    media_type="series" if candidate.media_type == "series" else "movie",
-                    year=candidate.year,
-                    confidence=candidate.confidence,
-                    overview="Identificacao parcial: nao consegui confirmar o catalogo nem no TMDb nem no IMDb/OMDb.",
-                    payload={
-                        "fallback": "vision-only",
-                        "visible_text": candidate.visible_text,
-                        "alt_titles": candidate.alt_titles,
-                    },
-                )
+            except HTTPException as omdb_exc:
+                if omdb_exc.status_code != 404:
+                    raise
+                raise VisionIdentificationError(
+                    "O titulo sugerido pela imagem nao foi confirmado no catalogo.",
+                    [f"Catalogo TMDb/IMDb: sem correspondencia para {candidate.detected_title or 'titulo desconhecido'}."],
+                ) from omdb_exc
         enriched = await self.omdb.attach_ratings(enriched)
         return await self.trakt.attach_public_ratings(enriched)
 

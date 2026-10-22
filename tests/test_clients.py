@@ -5,10 +5,11 @@ import base64
 import json
 from types import SimpleNamespace
 
+import httpx
 import pytest
 from PIL import Image, ImageDraw, ImageFont
 
-from app.clients import EvolutionClient, OpenRouterClient, TMDbClient, TMDbReviewClient, TelegramClient, TraktReviewClient
+from app.clients import EvolutionClient, OpenRouterClient, TMDbClient, TMDbReviewClient, TelegramClient, TraktClient, TraktReviewClient
 from app.config import Settings
 from app.exceptions import VisionIdentificationError
 from app.schemas import VisionCandidate
@@ -631,7 +632,33 @@ async def test_identify_title_tries_assertive_paid_models_when_initial_pass_is_w
 
     assert candidate.detected_title == "The Gift"
     assert calls[0] is None
-    assert calls[1][0] == "google/gemini-3-flash-preview"
+    assert calls[1] == client.settings.openrouter_paid_vision_models
+
+
+@pytest.mark.asyncio
+async def test_trakt_public_data_403_keeps_identified_media_usable(monkeypatch) -> None:
+    original_async_client = httpx.AsyncClient
+
+    def forbidden(_request: httpx.Request) -> httpx.Response:
+        return httpx.Response(403, text="Forbidden")
+
+    transport = httpx.MockTransport(forbidden)
+    monkeypatch.setattr(
+        "app.clients.httpx.AsyncClient",
+        lambda *args, **kwargs: original_async_client(*args, transport=transport, **kwargs),
+    )
+    enriched = SimpleNamespace(
+        title="Scent of a Woman",
+        original_title="Scent of a Woman",
+        media_type="movie",
+        year=1992,
+        ratings={"IMDb": "8.0/10"},
+        payload={"ids": {"trakt": 1644}},
+    )
+
+    assert await TraktClient(build_settings()).attach_public_ratings(enriched) is enriched
+    assert enriched.ratings == {"IMDb": "8.0/10"}
+    assert await TraktReviewClient(build_settings()).fetch_reviews(enriched) == []
 
 
 @pytest.mark.asyncio

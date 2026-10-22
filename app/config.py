@@ -61,20 +61,15 @@ class Settings(BaseSettings):
     openrouter_free_models_cache_file: str = ".cache/openrouter_free_models.json"
     openrouter_vision_models: list[str] = Field(
         default_factory=lambda: [
-            "mistralai/mistral-small-3.1-24b-instruct:free",
-            "google/gemma-3-27b-it:free",
-            "nvidia/nemotron-nano-12b-v2-vl:free",
-            "google/gemma-3-12b-it:free",
-            "google/gemma-3-4b-it:free",
+            "openai/gpt-6-luna",
+            "anthropic/claude-haiku-5.5",
         ]
     )
     openrouter_enable_paid_fallback: bool = True
     openrouter_paid_vision_models: list[str] = Field(
         default_factory=lambda: [
-            "google/gemini-3-flash-preview",
-            "google/gemini-2.5-pro",
-            "google/gemini-2.5-flash",
-            "openai/gpt-4.1-mini",
+            "openai/gpt-6-luna",
+            "anthropic/claude-haiku-5.5",
         ]
     )
     openrouter_emergency_router: str = "openrouter/free"

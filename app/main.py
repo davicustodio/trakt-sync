@@ -588,9 +588,9 @@ async def trakt_admin(
             }
         )
     return templates.TemplateResponse(
-        "trakt_admin.html",
-        {
-            "request": request,
+        request=request,
+        name="trakt_admin.html",
+        context={
             "profiles": profile_rows,
             "redirect_uri": settings.computed_trakt_redirect_uri,
             "admin_secret": settings.admin_shared_secret or "",

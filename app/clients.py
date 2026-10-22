@@ -5,6 +5,7 @@ import base64
 import binascii
 import contextlib
 import json
+import logging
 import os
 import re
 import tempfile
@@ -22,6 +23,8 @@ from app.config import Settings
 from app.exceptions import AmbiguousTitleError, VisionIdentificationError
 from app.schemas import EnrichedMedia, VisionCandidate
 from app.utils import compact_text, normalize_phone, parse_json_response
+
+logger = logging.getLogger(__name__)
 
 
 class EvolutionClient:
@@ -987,21 +990,7 @@ class OpenRouterClient:
         image_bytes: bytes,
         ocr_hint: VisionCandidate | None,
     ) -> tuple[VisionCandidate, list[str]]:
-        preferred_models = list(
-            dict.fromkeys(
-                [
-                    model
-                    for model in [
-                        "google/gemini-3-flash-preview",
-                        "google/gemini-2.5-pro",
-                        "google/gemini-2.5-flash",
-                        "openai/gpt-4.1-mini",
-                        *self.settings.openrouter_paid_vision_models,
-                    ]
-                    if model
-                ]
-            )
-        )
+        preferred_models = list(dict.fromkeys(model for model in self.settings.openrouter_paid_vision_models if model))
         if not preferred_models:
             return VisionCandidate(), []
         hint_title = ocr_hint.detected_title if ocr_hint and ocr_hint.detected_title else "sem palpite"
@@ -1467,15 +1456,19 @@ class TraktReviewClient:
         }
 
     async def fetch_reviews(self, enriched: EnrichedMedia) -> list[str]:
-        trakt_id = await self._resolve_trakt_id(enriched)
-        if not trakt_id:
+        try:
+            trakt_id = await self._resolve_trakt_id(enriched)
+            if not trakt_id:
+                return []
+            resource = "shows" if enriched.media_type == "series" else "movies"
+            path = f"/{resource}/{trakt_id}/comments/newest"
+            async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+                response = await client.get(path, headers=self._headers(), params={"limit": 20, "extended": "full"})
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            logger.warning("Trakt public reviews unavailable: %s", exc)
             return []
-        resource = "shows" if enriched.media_type == "series" else "movies"
-        path = f"/{resource}/{trakt_id}/comments/newest"
-        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
-            response = await client.get(path, headers=self._headers(), params={"limit": 20, "extended": "full"})
-            response.raise_for_status()
-            payload = response.json()
         ranked: list[tuple[tuple[int, int, int, int], str]] = []
         for item in payload if isinstance(payload, list) else []:
             comment = " ".join(str(item.get("comment") or "").split())
@@ -1636,10 +1629,14 @@ class TraktClient:
         params: dict[str, Any] = {"query": query, "extended": "full"}
         if enriched.year:
             params["years"] = enriched.year
-        async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
-            response = await client.get(f"/search/{resource}", headers=self._public_headers(), params=params)
-            response.raise_for_status()
-            payload = response.json()
+        try:
+            async with httpx.AsyncClient(base_url="https://api.trakt.tv", timeout=30.0) as client:
+                response = await client.get(f"/search/{resource}", headers=self._public_headers(), params=params)
+                response.raise_for_status()
+                payload = response.json()
+        except httpx.HTTPError as exc:
+            logger.warning("Trakt public ratings unavailable: %s", exc)
+            return enriched
         best = None
         best_score = -1.0
         for item in payload if isinstance(payload, list) else []:

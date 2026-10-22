@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
 
@@ -361,6 +362,29 @@ def test_telegram_webhook_handles_admin_help_inline(monkeypatch) -> None:
         "5. Abra o painel admin: http://localhost:8000/admin/trakt?token=admin123\n"
         "6. Na coluna Acesso Telegram, clique em Aprovar ou Revogar para cada usuario."
     ]
+
+
+def test_trakt_admin_page_renders_with_current_starlette() -> None:
+    settings = build_settings()
+    settings.admin_shared_secret = "admin123"
+    app.dependency_overrides[settings_dep] = lambda: settings
+
+    class FakeAdminDB:
+        async def execute(self, statement):
+            return SimpleNamespace(scalars=lambda: SimpleNamespace(all=lambda: []))
+
+    async def fake_admin_db_dep() -> AsyncIterator[object]:
+        yield FakeAdminDB()
+
+    app.dependency_overrides[db_dep] = fake_admin_db_dep
+    try:
+        with TestClient(app) as client:
+            response = client.get("/admin/trakt", headers={"X-Admin-Secret": "admin123"})
+    finally:
+        app.dependency_overrides.clear()
+
+    assert response.status_code == 200
+    assert "Usuarios e Trakt" in response.text
 
 
 def test_telegram_webhook_blocks_unapproved_user_when_approval_required(monkeypatch) -> None:

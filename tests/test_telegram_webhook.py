@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from collections.abc import AsyncIterator
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from urllib.parse import parse_qs, urlparse
 
@@ -282,44 +283,6 @@ def test_telegram_webhook_handles_start_inline(monkeypatch) -> None:
 
 
 def test_telegram_webhook_handles_trakt_connect_inline(monkeypatch) -> None:
-    app.dependency_overrides[settings_dep] = lambda: build_settings()
-    app.dependency_overrides[db_dep] = fake_db_dep
-    sent: list[str] = []
-
-    class FakeTelegramClient:
-        def __init__(self, settings) -> None:
-            pass
-
-        async def send_text(self, chat_id: str, text: str) -> int | None:
-            sent.append(text)
-            return 1
-
-    async def fake_persist(self, normalized):
-        from app.services import PersistMessageResult
-        from types import SimpleNamespace
-
-        return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
-
-    monkeypatch.setattr("app.main.TelegramClient", FakeTelegramClient)
-    monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
-
-    with TestClient(app) as client:
-        response = client.post(
-            "/webhooks/telegram",
-            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
-            json=build_payload(text="/trakt-connect"),
-        )
-
-    app.dependency_overrides.clear()
-    assert response.status_code == 200
-    assert response.json() == {"status": "accepted", "command": "/trakt-connect"}
-    assert sent
-    assert sent == [
-        "Abra este link para conectar sua conta Trakt:\nhttp://localhost:8000/admin/trakt/connect/telegram_321"
-    ]
-
-
-def test_telegram_webhook_handles_admin_help_inline(monkeypatch) -> None:
     settings = build_settings()
     settings.admin_shared_secret = "admin123"
     app.dependency_overrides[settings_dep] = lambda: settings
@@ -347,11 +310,75 @@ def test_telegram_webhook_handles_admin_help_inline(monkeypatch) -> None:
         response = client.post(
             "/webhooks/telegram",
             headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
+            json=build_payload(text="/trakt-connect"),
+        )
+        connect_url = sent[0].splitlines()[1]
+        connect_token = connect_url.rsplit("/", 1)[-1]
+        connect_response = client.get(urlparse(connect_url).path, follow_redirects=False)
+        expired_token = encode_state(
+            {
+                "purpose": "telegram-connect",
+                "phone_number": "telegram_321",
+                "generated_at": (datetime.now(UTC) - timedelta(minutes=16)).isoformat(),
+            },
+            settings.trakt_client_secret,
+        )
+        expired_response = client.get(f"/auth/trakt/connect/{expired_token}", follow_redirects=False)
+
+    app.dependency_overrides.clear()
+    assert response.status_code == 200
+    assert response.json() == {"status": "accepted", "command": "/trakt-connect"}
+    assert connect_url.startswith("http://localhost:8000/auth/trakt/connect/")
+    assert "admin123" not in connect_url
+    assert decode_state(connect_token, settings.trakt_client_secret)["phone_number"] == "telegram_321"
+    assert connect_response.status_code == 302
+    assert connect_response.headers["location"].startswith("https://trakt.tv/oauth/authorize?")
+    assert expired_response.status_code == 400
+
+
+def test_telegram_webhook_handles_admin_help_inline(monkeypatch) -> None:
+    settings = build_settings()
+    settings.admin_shared_secret = "admin123"
+    settings.telegram_auto_approved_user_keys = ["telegram_321"]
+    app.dependency_overrides[settings_dep] = lambda: settings
+    app.dependency_overrides[db_dep] = fake_db_dep
+    sent: list[str] = []
+
+    class FakeTelegramClient:
+        def __init__(self, settings) -> None:
+            pass
+
+        async def send_text(self, chat_id: str, text: str) -> int | None:
+            sent.append(text)
+            return 1
+
+    async def fake_persist(self, normalized):
+        from app.services import PersistMessageResult
+        from types import SimpleNamespace
+
+        return PersistMessageResult(message=SimpleNamespace(id=1), created=True)
+
+    monkeypatch.setattr("app.main.TelegramClient", FakeTelegramClient)
+    monkeypatch.setattr("app.main.MessageService.persist_message", fake_persist)
+
+    with TestClient(app) as client:
+        response = client.post(
+            "/webhooks/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
             json=build_payload(text="/admin-help"),
+        )
+        other_user_payload = build_payload(text="/admin-help")
+        other_user_payload["message"]["from"]["id"] = 999
+        other_user_payload["message"]["chat"]["id"] = 999
+        other_response = client.post(
+            "/webhooks/telegram",
+            headers={"X-Telegram-Bot-Api-Secret-Token": "telegram-secret"},
+            json=other_user_payload,
         )
 
     app.dependency_overrides.clear()
     assert response.status_code == 200
+    assert other_response.status_code == 200
     assert response.json() == {"status": "accepted", "command": "/admin-help"}
     assert sent == [
         "Controle de acesso do bot\n"
@@ -360,7 +387,8 @@ def test_telegram_webhook_handles_admin_help_inline(monkeypatch) -> None:
         "3. Defina TELEGRAM_AUTO_APPROVED_USER_KEYS=telegram_321 para manter seu acesso.\n"
         "4. Compartilhe o bot com seus amigos e peca para enviarem /start.\n"
         "5. Abra o painel admin: http://localhost:8000/admin/trakt?token=admin123\n"
-        "6. Na coluna Acesso Telegram, clique em Aprovar ou Revogar para cada usuario."
+        "6. Na coluna Acesso Telegram, clique em Aprovar ou Revogar para cada usuario.",
+        "Comando disponivel apenas para o administrador do bot.",
     ]
 
 

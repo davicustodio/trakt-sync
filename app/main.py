@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 import asyncio
+import binascii
 import contextlib
 from contextlib import asynccontextmanager
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Annotated
 
 from fastapi import BackgroundTasks, Depends, FastAPI, Form, Header, HTTPException, Request
@@ -204,9 +205,15 @@ async def _handle_telegram_utility_command(
         return {"status": "accepted", "command": command}
 
     if command == "/trakt-connect":
-        url = f"{settings.app_base_url.rstrip('/')}/admin/trakt/connect/{normalized.requester_phone}"
-        if settings.admin_shared_secret:
-            url = f"{url}?token={settings.admin_shared_secret}"
+        connect_token = encode_state(
+            {
+                "purpose": "telegram-connect",
+                "phone_number": normalized.requester_phone,
+                "generated_at": datetime.now(UTC).isoformat(),
+            },
+            settings.trakt_client_secret,
+        )
+        url = f"{settings.app_base_url.rstrip('/')}/auth/trakt/connect/{connect_token}"
         await telegram.send_text(normalized.chat_jid, f"Abra este link para conectar sua conta Trakt:\n{url}")
         return {"status": "accepted", "command": command}
 
@@ -230,6 +237,9 @@ async def _handle_telegram_utility_command(
         return {"status": "accepted", "command": command}
 
     if command == "/admin-help":
+        if normalized.requester_phone not in settings.telegram_auto_approved_user_keys:
+            await telegram.send_text(normalized.chat_jid, "Comando disponivel apenas para o administrador do bot.")
+            return {"status": "accepted", "command": command}
         admin_url = f"{settings.app_base_url.rstrip('/')}/admin/trakt"
         if settings.admin_shared_secret:
             admin_url = f"{admin_url}?token={settings.admin_shared_secret}"
@@ -644,6 +654,31 @@ async def connect_trakt(
     _: Annotated[None, Depends(require_admin)],
     settings: Annotated[Settings, Depends(settings_dep)],
 ) -> RedirectResponse:
+    return _redirect_to_trakt(phone_number, settings)
+
+
+@app.get("/auth/trakt/connect/{token}")
+async def connect_trakt_from_telegram(
+    token: str,
+    settings: Annotated[Settings, Depends(settings_dep)],
+) -> RedirectResponse:
+    try:
+        payload = decode_state(token, settings.trakt_client_secret)
+        if not isinstance(payload, dict):
+            raise ValueError("Invalid connect payload")
+        if payload.get("purpose") != "telegram-connect":
+            raise ValueError("Invalid connect purpose")
+        generated_at = datetime.fromisoformat(payload["generated_at"])
+        age = datetime.now(UTC) - generated_at
+        if generated_at.tzinfo is None or not timedelta(0) <= age <= timedelta(minutes=15):
+            raise ValueError("Expired connect link")
+        phone_number = normalize_requester_key(payload["phone_number"])
+    except (binascii.Error, KeyError, TypeError, ValueError) as exc:
+        raise HTTPException(status_code=400, detail="Invalid or expired Trakt connect link.") from exc
+    return _redirect_to_trakt(phone_number, settings)
+
+
+def _redirect_to_trakt(phone_number: str, settings: Settings) -> RedirectResponse:
     client = TraktClient(settings)
     state = encode_state(
         {"phone_number": normalize_requester_key(phone_number), "generated_at": datetime.now(UTC).isoformat()},

@@ -1,10 +1,11 @@
 from __future__ import annotations
 
+import asyncio
 from types import SimpleNamespace
 
 import pytest
 
-from app.worker import process_telegram_x_info, process_telegram_x_save
+from app.worker import _telegram_review_messages, process_telegram_x_info, process_telegram_x_save
 
 
 class DummyContextManager:
@@ -16,6 +17,19 @@ class DummyContextManager:
 
     async def __aexit__(self, exc_type, exc, tb) -> None:
         return None
+
+
+@pytest.mark.asyncio
+async def test_slow_reviews_fall_back_within_time_limit(monkeypatch) -> None:
+    class SlowPipeline:
+        async def format_review_messages(self, enriched) -> list[str]:
+            await asyncio.sleep(1)
+            return ["Review tardia"]
+
+    monkeypatch.setattr("app.worker.TELEGRAM_REVIEWS_TIMEOUT_SECONDS", 0.01)
+    assert await _telegram_review_messages(SlowPipeline(), object()) == [
+        "Reviews\nNao foi possivel carregar as reviews no momento."
+    ]
 
 
 @pytest.mark.asyncio

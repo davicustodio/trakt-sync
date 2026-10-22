@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+import asyncio
+import logging
+
 from arq import func
 from fastapi import HTTPException
 from sqlalchemy import select
@@ -11,6 +14,21 @@ from app.models import PhoneProfile, TraktConnection
 from app.queue import redis_settings
 from app.services import MessageService, PipelineService
 from app.utils import TELEGRAM_USER_KEY_PREFIX
+
+
+logger = logging.getLogger(__name__)
+TELEGRAM_REVIEWS_TIMEOUT_SECONDS = 30.0
+
+
+async def _telegram_review_messages(pipeline: PipelineService, enriched) -> list[str]:
+    try:
+        return await asyncio.wait_for(
+            pipeline.format_review_messages(enriched),
+            timeout=TELEGRAM_REVIEWS_TIMEOUT_SECONDS,
+        )
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("Telegram reviews unavailable: %s", exc)
+        return ["Reviews\nNao foi possivel carregar as reviews no momento."]
 
 
 async def startup(_: dict) -> None:
@@ -253,7 +271,7 @@ async def process_telegram_x_info(
             )
             if pipeline.telegram is not None:
                 await pipeline.telegram.send_text(chat_id, await pipeline.format_media_reply(enriched))
-                for review_message in await pipeline.format_review_messages(enriched):
+                for review_message in await _telegram_review_messages(pipeline, enriched):
                     await pipeline.telegram.send_text(chat_id, review_message)
                 await service.store_pending_identification(
                     chat_id,
@@ -334,7 +352,7 @@ async def process_telegram_x_info_confirmation(_: dict, chat_id: str, requester_
                 await service.clear_pending_identification(chat_id, requester_key)
             if pipeline.telegram is not None:
                 await pipeline.telegram.send_text(chat_id, await pipeline.format_media_reply(enriched))
-                for review_message in await pipeline.format_review_messages(enriched):
+                for review_message in await _telegram_review_messages(pipeline, enriched):
                     await pipeline.telegram.send_text(chat_id, review_message)
                 await service.store_pending_identification(
                     chat_id,

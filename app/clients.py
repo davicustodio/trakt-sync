@@ -26,6 +26,24 @@ from app.utils import compact_text, normalize_phone, parse_json_response
 
 logger = logging.getLogger(__name__)
 
+TELEGRAM_TEXT_CHUNK_SIZE = 3900
+
+
+def _telegram_text_chunks(text: str) -> list[str]:
+    chunks: list[str] = []
+    remaining = text
+    while len(remaining) > TELEGRAM_TEXT_CHUNK_SIZE:
+        split_at = remaining.rfind("\n", 0, TELEGRAM_TEXT_CHUNK_SIZE + 1)
+        if split_at < TELEGRAM_TEXT_CHUNK_SIZE // 2:
+            split_at = remaining.rfind(" ", 0, TELEGRAM_TEXT_CHUNK_SIZE + 1)
+        if split_at < TELEGRAM_TEXT_CHUNK_SIZE // 2:
+            split_at = TELEGRAM_TEXT_CHUNK_SIZE - 1
+        split_at += 1
+        chunks.append(remaining[:split_at])
+        remaining = remaining[split_at:]
+    chunks.append(remaining)
+    return chunks
+
 
 class EvolutionClient:
     def __init__(self, settings: Settings) -> None:
@@ -114,19 +132,37 @@ class TelegramClient:
     def _file_base_url(self) -> str:
         return f"https://api.telegram.org/file/bot{self.settings.telegram_bot_token}"
 
-    async def send_text(self, chat_id: str, text: str, *, parse_mode: str | None = None) -> int | None:
-        payload: dict[str, Any] = {
-            "chat_id": str(chat_id),
-            "text": text,
-        }
-        if parse_mode:
-            payload["parse_mode"] = parse_mode
-        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
-            response = await client.post("/sendMessage", json=payload)
+    @staticmethod
+    def _check_response(response: httpx.Response) -> None:
+        try:
             response.raise_for_status()
-            result = response.json().get("result") or {}
-            message_id = result.get("message_id")
-            return int(message_id) if isinstance(message_id, int) else None
+        except httpx.HTTPStatusError:
+            try:
+                detail = response.json().get("description")
+            except (ValueError, AttributeError):
+                detail = None
+            message = f"Telegram API HTTP {response.status_code}"
+            if detail:
+                message += f": {detail}"
+            raise RuntimeError(message) from None
+
+    async def send_text(self, chat_id: str, text: str, *, parse_mode: str | None = None) -> int | None:
+        message_id: int | None = None
+        async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
+            for chunk in _telegram_text_chunks(text):
+                payload: dict[str, Any] = {"chat_id": str(chat_id), "text": chunk}
+                if parse_mode:
+                    payload["parse_mode"] = parse_mode
+                try:
+                    response = await client.post("/sendMessage", json=payload)
+                except httpx.HTTPError as exc:
+                    raise RuntimeError(f"Telegram API network error: {type(exc).__name__}") from None
+                self._check_response(response)
+                result = response.json().get("result") or {}
+                sent_id = result.get("message_id")
+                if isinstance(sent_id, int):
+                    message_id = sent_id
+        return message_id
 
     async def edit_text(self, chat_id: str, message_id: int, text: str, *, parse_mode: str | None = None) -> None:
         payload: dict[str, Any] = {
@@ -137,25 +173,37 @@ class TelegramClient:
         if parse_mode:
             payload["parse_mode"] = parse_mode
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
-            response = await client.post("/editMessageText", json=payload)
-            response.raise_for_status()
+            try:
+                response = await client.post("/editMessageText", json=payload)
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Telegram API network error: {type(exc).__name__}") from None
+            self._check_response(response)
 
     async def send_chat_action(self, chat_id: str, action: str = "typing") -> None:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=15.0) as client:
-            response = await client.post("/sendChatAction", json={"chat_id": str(chat_id), "action": action})
-            response.raise_for_status()
+            try:
+                response = await client.post("/sendChatAction", json={"chat_id": str(chat_id), "action": action})
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Telegram API network error: {type(exc).__name__}") from None
+            self._check_response(response)
 
     async def fetch_media_bytes(self, file_id: str) -> bytes:
         async with httpx.AsyncClient(base_url=self._base_url, timeout=30.0) as client:
-            response = await client.post("/getFile", json={"file_id": file_id})
-            response.raise_for_status()
+            try:
+                response = await client.post("/getFile", json={"file_id": file_id})
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Telegram API network error: {type(exc).__name__}") from None
+            self._check_response(response)
             payload = response.json()
         file_path = ((payload.get("result") or {}).get("file_path")) if isinstance(payload, dict) else None
         if not file_path:
             raise HTTPException(status_code=404, detail="Telegram file_path not found.")
         async with httpx.AsyncClient(timeout=60.0) as client:
-            response = await client.get(f"{self._file_base_url}/{file_path}")
-            response.raise_for_status()
+            try:
+                response = await client.get(f"{self._file_base_url}/{file_path}")
+            except httpx.HTTPError as exc:
+                raise RuntimeError(f"Telegram API network error: {type(exc).__name__}") from None
+            self._check_response(response)
             return response.content
 
 

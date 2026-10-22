@@ -186,6 +186,65 @@ async def test_telegram_send_text_returns_message_id(monkeypatch) -> None:
 
 
 @pytest.mark.asyncio
+async def test_telegram_send_text_splits_long_review_without_losing_text(monkeypatch) -> None:
+    chunks: list[str] = []
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict[str, object]:
+            return {"result": {"message_id": len(chunks)}}
+
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, object]) -> FakeResponse:
+            assert path == "/sendMessage"
+            chunks.append(str(json["text"]))
+            return FakeResponse()
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+    review = "Review 1\n" + ("Uma análise detalhada do filme. " * 200)
+    message_id = await TelegramClient(build_settings()).send_text("321", review)
+
+    assert len(chunks) > 1
+    assert all(0 < len(chunk) <= 3900 for chunk in chunks)
+    assert "".join(chunks) == review
+    assert message_id == len(chunks)
+
+
+@pytest.mark.asyncio
+async def test_telegram_error_does_not_expose_bot_token(monkeypatch) -> None:
+    class FakeAsyncClient:
+        def __init__(self, *args, **kwargs) -> None:
+            pass
+
+        async def __aenter__(self):
+            return self
+
+        async def __aexit__(self, exc_type, exc, tb) -> None:
+            return None
+
+        async def post(self, path: str, json: dict[str, object]) -> httpx.Response:
+            request = httpx.Request("POST", f"https://api.telegram.org/bottelegram-token{path}")
+            return httpx.Response(400, json={"description": "Bad Request: message is too long"}, request=request)
+
+    monkeypatch.setattr("app.clients.httpx.AsyncClient", FakeAsyncClient)
+
+    with pytest.raises(RuntimeError, match="message is too long") as error:
+        await TelegramClient(build_settings()).send_text("321", "teste")
+    assert "telegram-token" not in str(error.value)
+
+
+@pytest.mark.asyncio
 async def test_telegram_fetch_media_bytes_uses_get_file_and_download(monkeypatch) -> None:
     calls: list[tuple[str, str]] = []
 
